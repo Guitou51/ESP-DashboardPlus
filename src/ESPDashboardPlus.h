@@ -258,7 +258,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
         config["unit"] = unit;
@@ -291,7 +291,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["icon"] = iconToString(icon);
         config["variant"] = variantToString(variant);
@@ -344,7 +344,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["chartType"] = chartTypeToString(chartType);
         config["color"] = variantToString(variant);
@@ -353,19 +353,19 @@ public:
         
         // Multi-series data
         if (series.size() > 0) {
-            JsonArray seriesArr = config.createNestedArray("series");
+            JsonArray seriesArr = config["series"].to<JsonArray>();
             for (const ChartSeries& s : series) {
-                JsonObject seriesObj = seriesArr.createNestedObject();
+                JsonObject seriesObj = seriesArr.add<JsonObject>();
                 seriesObj["name"] = s.name;
                 seriesObj["color"] = s.color;
-                JsonArray dataArr = seriesObj.createNestedArray("data");
+                JsonArray dataArr = seriesObj["data"].to<JsonArray>();
                 for (float val : s.data) {
                     dataArr.add(val);
                 }
             }
         } else {
             // Legacy single-series format
-            JsonArray dataArr = config.createNestedArray("data");
+            JsonArray dataArr = config["data"].to<JsonArray>();
             for (float val : data) {
                 dataArr.add(val);
             }
@@ -429,7 +429,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["label"] = label;
         config["variant"] = variantToString(variant);
@@ -464,7 +464,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["label"] = label;
         config["url"] = url;
@@ -498,7 +498,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["label"] = label;
         config["value"] = value;
@@ -538,7 +538,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
         config["includeTime"] = includeTime;
@@ -576,7 +576,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
         config["includeSeconds"] = includeSeconds;
@@ -614,7 +614,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["label"] = label;
         config["latitude"] = latitude;
@@ -658,7 +658,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["label"] = label;
         config["confirmTitle"] = confirmTitle;
@@ -699,7 +699,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
         config["placeholder"] = placeholder;
@@ -756,10 +756,10 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
-        JsonArray presetsArr = config.createNestedArray("presets");
+        JsonArray presetsArr = config["presets"].to<JsonArray>();
         for (const String& preset : presets) {
             presetsArr.add(preset);
         }
@@ -797,13 +797,13 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
         config["placeholder"] = placeholder;
-        JsonArray optionsArr = config.createNestedArray("options");
+        JsonArray optionsArr = config["options"].to<JsonArray>();
         for (const DropdownOption& opt : options) {
-            JsonObject optObj = optionsArr.createNestedObject();
+            JsonObject optObj = optionsArr.add<JsonObject>();
             optObj["value"] = opt.value;
             optObj["label"] = opt.label;
         }
@@ -843,7 +843,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["label"] = label;
         config["value"] = value;
@@ -880,7 +880,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
         config["min"] = min;
@@ -922,13 +922,13 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["value"] = value;
         config["min"] = min;
         config["max"] = max;
         config["unit"] = unit;
-        JsonObject thresholds = config.createNestedObject("thresholds");
+        JsonObject thresholds = config["thresholds"].to<JsonObject>();
         thresholds["warning"] = warningThreshold;
         thresholds["danger"] = dangerThreshold;
         if (sizeX > 1) config["sizeX"] = sizeX;
@@ -955,7 +955,7 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["maxSize"] = maxSizeMB;
     }
@@ -979,12 +979,12 @@ public:
         card["id"] = id;
         card["type"] = typeToString(type);
         card["weight"] = weight;
-        JsonObject config = card.createNestedObject("config");
+        JsonObject config = card["config"].to<JsonObject>();
         config["title"] = title;
         config["autoScroll"] = autoScroll;
-        JsonArray logsArr = config.createNestedArray("logs");
+        JsonArray logsArr = config["logs"].to<JsonArray>();
         for (const LogEntry& entry : logs) {
-            JsonObject logObj = logsArr.createNestedObject();
+            JsonObject logObj = logsArr.add<JsonObject>();
             logObj["timestamp"] = entry.timestamp;
             logObj["level"] = logLevelToString(entry.level);
             logObj["message"] = entry.message;
@@ -1092,7 +1092,7 @@ private:
             return;
         }
         
-        StaticJsonDocument<4096> doc;
+        JsonDocument doc;
         // Explicitly cast to const char* to ensure correct ArduinoJson overload
         DeserializationError error = deserializeJson(doc, (const char*)data, len);
         
@@ -1239,7 +1239,7 @@ private:
    }
      
     void sendCardsToClient(AsyncWebSocketClient* client) {
-        DynamicJsonDocument doc(8192);
+        JsonDocument doc;
         doc["type"] = "init";
         doc["title"] = _title;
         if (_subtitle.length() > 0) {
@@ -1256,21 +1256,21 @@ private:
             doc["lastUpdate"] = _lastUpdate;
         }
         
-        JsonArray cardsArray = doc.createNestedArray("cards");
+        JsonArray cardsArray = doc["cards"].to<JsonArray>();
         
         for (auto& pair : _cards) {
-            JsonObject card = cardsArray.createNestedObject();
+            JsonObject card = cardsArray.add<JsonObject>();
             pair.second->toJson(card);
         }
         
         // Include groups
         if (_groups.size() > 0) {
-            JsonArray groupsArray = doc.createNestedArray("groups");
+            JsonArray groupsArray = doc["groups"].to<JsonArray>();
             for (const CardGroup& group : _groups) {
-                JsonObject groupObj = groupsArray.createNestedObject();
+                JsonObject groupObj = groupsArray.add<JsonObject>();
                 groupObj["id"] = group.id;
                 groupObj["title"] = group.title;
-                JsonArray cardIdsArr = groupObj.createNestedArray("cardIds");
+                JsonArray cardIdsArr = groupObj["cardIds"].to<JsonArray>();
                 for (const String& cardId : group.cardIds) {
                     cardIdsArr.add(cardId);
                 }
@@ -1320,7 +1320,7 @@ private:
         if (!_ws) return;
         
         // Send a minimal heartbeat message
-        StaticJsonDocument<64> doc;
+        JsonDocument doc;
         doc["type"] = "heartbeat";
         doc["timestamp"] = millis();
         
@@ -1425,7 +1425,7 @@ using ESPDashboard = ESPDashboardPlus;
         
         // Serve compressed dashboard HTML from PROGMEM
         _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
-            AsyncWebServerResponse* response = request->beginResponse_P(
+            AsyncWebServerResponse* response = request->beginResponse(
                 200, "text/html", _htmlData, _htmlSize);
             response->addHeader("Content-Encoding", "gzip");
             response->addHeader("Cache-Control", "max-age=86400");
@@ -1485,7 +1485,7 @@ using ESPDashboard = ESPDashboardPlus;
      void broadcastUpdate(const String& cardId, JsonObject& data) {
          if (!_ws) return;
          
-         StaticJsonDocument<512> doc;
+         JsonDocument doc;
          doc["type"] = "update";
          doc["cardId"] = cardId;
          doc["data"] = data;
@@ -1672,7 +1672,7 @@ using ESPDashboard = ESPDashboardPlus;
              _cards.erase(id);
              
              // Notify clients
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              doc["type"] = "remove";
              doc["cardId"] = id;
              
@@ -1688,7 +1688,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::STAT) {
              card->setValue(value);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = value;
              broadcastUpdate(id, data);
@@ -1700,7 +1700,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::STATUS) {
              card->setStatus(icon, variant, label, message);
              
-             StaticJsonDocument<512> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["icon"] = card->getIconString(icon);
              data["variant"] = card->getVariantString();
@@ -1716,7 +1716,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::CHART) {
              card->addDataPoint(value);
              
-             DynamicJsonDocument doc(2048);
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              JsonArray dataArr = data["data"].to<JsonArray>();
              for (float v : card->data) {
@@ -1732,14 +1732,14 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::CHART) {
              card->addDataPoint(seriesIndex, value);
              
-             DynamicJsonDocument doc(4096);
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              JsonArray seriesArr = data["series"].to<JsonArray>();
              for (const ChartSeries& s : card->series) {
-                 JsonObject seriesObj = seriesArr.createNestedObject();
+                 JsonObject seriesObj = seriesArr.add<JsonObject>();
                  seriesObj["name"] = s.name;
                  seriesObj["color"] = s.color;
-                 JsonArray dataArr = seriesObj.createNestedArray("data");
+                 JsonArray dataArr = seriesObj["data"].to<JsonArray>();
                  for (float v : s.data) {
                      dataArr.add(v);
                  }
@@ -1753,7 +1753,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::GAUGE) {
              card->setValue(value);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = value;
              broadcastUpdate(id, data);
@@ -1765,7 +1765,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::TOGGLE) {
              card->setValue(value);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = value;
              broadcastUpdate(id, data);
@@ -1777,7 +1777,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::SLIDER) {
              card->setValue(value);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = value;
              broadcastUpdate(id, data);
@@ -1789,7 +1789,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::COLOR) {
              card->setValue(color);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = color;
              broadcastUpdate(id, data);
@@ -1801,7 +1801,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::DROPDOWN) {
              card->setValue(value);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = value;
              broadcastUpdate(id, data);
@@ -1813,7 +1813,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::DATE) {
              card->setValue(value);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = value;
              broadcastUpdate(id, data);
@@ -1825,7 +1825,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::TIME) {
              card->setValue(value);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["value"] = value;
              broadcastUpdate(id, data);
@@ -1837,7 +1837,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::LOCATION) {
              card->setLocation(latitude, longitude);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["latitude"] = latitude;
              data["longitude"] = longitude;
@@ -1850,7 +1850,7 @@ using ESPDashboard = ESPDashboardPlus;
          if (card && card->type == CardType::LINK) {
              card->setUrl(url);
              
-             StaticJsonDocument<256> doc;
+             JsonDocument doc;
              JsonObject data = doc.to<JsonObject>();
              data["url"] = url;
              broadcastUpdate(id, data);
@@ -1923,7 +1923,7 @@ private:
             default: levelStr = "info"; break;
         }
         
-        StaticJsonDocument<512> doc;
+        JsonDocument doc;
         doc["type"] = "log";
         doc["timestamp"] = timestamp;
         doc["level"] = levelStr;
