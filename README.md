@@ -173,6 +173,53 @@ ESP-DashboardPlus/
 
 ## 🔧 Build Configuration
 
+### Reproducible repository builds
+
+The example uses these exact versions on Windows and Linux:
+
+| Component | Version |
+|-----------|---------|
+| Python | 3.13.5 (`.python-version`) |
+| PlatformIO Core | 6.2.0 |
+| pioarduino platform | 55.03.312-1 |
+| Arduino-ESP32 / ESP-IDF | 3.3.12 / 5.5.5 |
+| Xtensa / RISC-V GCC | 14.2.0+20260121 |
+| ArduinoJson | 7.4.3 |
+| ESPAsyncWebServer | 3.12.1 |
+| AsyncTCP | 3.5.0 |
+
+With Python 3.13.5 installed, create a separate environment:
+
+```sh
+python -m venv .pio/build-venv
+```
+
+Activate it with `.pio/build-venv/Scripts/Activate.ps1` in PowerShell, or
+`source .pio/build-venv/bin/activate` on Linux, then run:
+
+```sh
+python -m pip install -r requirements-build.txt
+python -m pip check
+python -m unittest discover -s tests -v
+python scripts/build.py -e esp32dev -e esp32-s3 -e esp32-c3
+```
+
+`scripts/build.py` checks the Python and core tool versions and passes
+`constraints-build.txt` to pip and uv, including the platform's separate Python
+environments. Use this entry point for reproducible builds; a bare `pio run`
+does not enforce the Python constraints. It accepts the usual `pio run` arguments.
+The default environment remains `esp32dev`.
+
+The versioned platform archive fixes the framework and toolchain releases.
+The CI uses Python 3.13.5, Ubuntu 24.04 and GitHub Actions pinned by commit SHA.
+HTML generation uses LF line endings and zero gzip timestamps, so generation time
+and Windows/Linux checkout line endings do not change the embedded page.
+This fixes dependency versions; it does not guarantee identical firmware bytes
+across different OS installations or GitHub-hosted runner image updates.
+
+When upgrading, update both dependency declarations, the Python requirements and
+constraints, then rebuild all three environments and run the HTML generation tests.
+
 ### platformio.ini
 
 ```ini
