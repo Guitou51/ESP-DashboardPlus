@@ -1,4 +1,5 @@
 .pio
 .vscode
+__pycache__/
 src/dashboard_html.h
 src/.dashboard_hash

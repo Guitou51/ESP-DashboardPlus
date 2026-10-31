@@ -141,6 +141,7 @@ Full documentation is available at: **[https://aaronbeckmann.github.io/ESP-Dashb
 - [Card Reference](https://aaronbeckmann.github.io/ESP-DashboardPlus/cards)
 - [API Reference](https://aaronbeckmann.github.io/ESP-DashboardPlus/api)
 - [Examples](https://aaronbeckmann.github.io/ESP-DashboardPlus/examples)
+- [Source Architecture](docs/architecture.md)
 
 ## 📁 Library Structure
 
@@ -150,7 +151,10 @@ ESP-DashboardPlus/
 ├── README.md                 # This file
 ├── LICENSE                   # MIT License
 ├── src/
-│   ├── ESPDashboardPlus.h    # Main library header
+│   ├── ESPDashboardPlus.h    # Public facade (declarations)
+│   ├── ESPDashboardPlus.cpp  # Facade implementation and composition
+│   ├── dashboard/           # Registry, JSON, transport and OTA services
+│   │   └── cards/           # One .h/.cpp pair per card
 │   └── dashboard_html.h      # Auto-generated (gzipped HTML)
 ├── extras/
 │   └── dashboard.html        # Source HTML file
