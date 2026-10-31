@@ -1425,7 +1425,7 @@ using ESPDashboard = ESPDashboardPlus;
         
         // Serve compressed dashboard HTML from PROGMEM
         _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
-            AsyncWebServerResponse* response = request->beginResponse_P(
+            AsyncWebServerResponse* response = request->beginResponse(
                 200, "text/html", _htmlData, _htmlSize);
             response->addHeader("Content-Encoding", "gzip");
             response->addHeader("Cache-Control", "max-age=86400");

@@ -108,7 +108,7 @@ const uint8_t DASHBOARD_HTML_DATA[{compressed_size}] PROGMEM = {{
  */
 #ifdef ESP_ASYNC_WEBSERVER_H
 inline void serveDashboardHTML(AsyncWebServerRequest *request) {{
-    AsyncWebServerResponse *response = request->beginResponse_P(
+    AsyncWebServerResponse *response = request->beginResponse(
         200, "text/html", DASHBOARD_HTML_DATA, DASHBOARD_HTML_SIZE);
     response->addHeader("Content-Encoding", "gzip");
     response->addHeader("Cache-Control", "max-age=86400");
