@@ -1,0 +1,13 @@
+{
+  "name": "esp-dashboardplus-frontend-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/frontend/dashboard.test.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

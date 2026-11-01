@@ -49,15 +49,17 @@ void ESPDashboardPlus::begin(AsyncWebServer* server, const uint8_t* htmlData, si
     _impl->state.enableConsole = enableConsole;
     _impl->transport.begin(
         server, htmlData, htmlSize, wsPath, [this](const MessageReply& reply) { _impl->router.initialize(reply); },
-        [this](const uint8_t* data, size_t size, const MessageReply& reply) {
-            _impl->router.handle(data, size, reply);
-        });
+        [this](const uint8_t* data, size_t size, const MessageReply& reply, uint32_t clientId) {
+            _impl->router.handle(data, size, reply, clientId);
+        },
+        [this](uint32_t clientId) { _impl->ota.disconnect(clientId); });
     Serial.println("[Dashboard] Initialized with PROGMEM HTML");
     Serial.printf("[Dashboard] OTA: %s, Console: %s\n", enableOTA ? "enabled" : "disabled",
                   enableConsole ? "enabled" : "disabled");
 }
 
 void ESPDashboardPlus::loop() {
+    _impl->ota.poll(millis());
     _impl->transport.loop();
 }
 

@@ -11,24 +11,27 @@ AsyncDashboardTransport::AsyncDashboardTransport()
 AsyncDashboardTransport::~AsyncDashboardTransport() = default;
 
 void AsyncDashboardTransport::begin(AsyncWebServer* server, const uint8_t* html, size_t size, const String& path,
-                                    Connected connected, Received received) {
+                                    Connected connected, Received received, Disconnected disconnected) {
     _socket = new AsyncWebSocket(path);
     _html = html;
     _htmlSize = size;
-    _socket->onEvent([this, connected, received](AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType type,
-                                                 void* arg, uint8_t* data, size_t length) {
+    _socket->onEvent([this, connected, received, disconnected](AsyncWebSocket*, AsyncWebSocketClient* client,
+                                                               AwsEventType type, void* arg, uint8_t* data,
+                                                               size_t length) {
         const MessageReply reply = [client](const String& message) { client->text(message); };
         if (type == WS_EVT_CONNECT) {
             Serial.printf("[Dashboard] Client #%u connected\n", client->id());
             connected(reply);
         } else if (type == WS_EVT_DISCONNECT) {
             Serial.printf("[Dashboard] Client #%u disconnected\n", client->id());
+            if (disconnected)
+                disconnected(client->id());
         } else if (type == WS_EVT_DATA) {
             const auto* info = static_cast<AwsFrameInfo*>(arg);
             if (info->opcode != WS_TEXT)
                 return;
             if (info->final && info->index == 0 && info->len == length) {
-                received(data, length, reply);
+                received(data, length, reply, client->id());
                 return;
             }
             if (info->index == 0) {
@@ -42,13 +45,22 @@ void AsyncDashboardTransport::begin(AsyncWebServer* server, const uint8_t* html,
                 _bufferFilled += length;
             }
             if (info->final && _buffer && _bufferFilled == _bufferSize) {
-                received(_buffer.get(), _bufferSize, reply);
+                received(_buffer.get(), _bufferSize, reply, client->id());
                 _buffer.reset();
                 _bufferSize = _bufferFilled = 0;
             }
         }
     });
     server->addHandler(_socket);
+    server->on("/esp-dashboard/config", HTTP_GET, [path](AsyncWebServerRequest* request) {
+        JsonDocument doc;
+        doc["wsPath"] = path;
+        String body;
+        serializeJson(doc, body);
+        auto* response = request->beginResponse(200, "application/json", body);
+        response->addHeader("Cache-Control", "no-store");
+        request->send(response);
+    });
     server->on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
         auto* response = request->beginResponse(200, "text/html", _html, _htmlSize);
         response->addHeader("Content-Encoding", "gzip");

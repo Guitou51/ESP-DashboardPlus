@@ -42,10 +42,10 @@ def main():
         compiler = os.environ.get('CXX') or shutil.which('c++')
         if not compiler:
             sys.exit('Install a C++17 compiler or set CXX.')
-        command = [compiler, '-std=c++17', '-DARDUINO_ARCH_ESP32']
+        command = [compiler, '-std=c++17', '-pthread', '-DARDUINO_ARCH_ESP32']
         command += ['-I' + str(path) for path in includes] + list(map(str, sources))
         subprocess.run(command + ['-o', str(executable)], cwd=build, check=True)
-    subprocess.run([str(executable), str(root / 'tests/native/expected_messages.jsonl')], cwd=root, check=True)
+    subprocess.run([str(executable), str(root / 'tests/native/expected_messages.jsonl')], cwd=root, check=True, timeout=60)
 
 
 if __name__ == '__main__':

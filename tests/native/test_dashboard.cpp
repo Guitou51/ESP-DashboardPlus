@@ -96,6 +96,12 @@ int main(int argc, char** argv) {
     const uint8_t html[] = {31, 139, 0};
     dashboard.begin(&server, html, sizeof(html), true, true, "/custom-ws");
     check(server.ws->path == "/custom-ws", "custom WebSocket path");
+    AsyncWebServerRequest configuration;
+    server.routes.at("/esp-dashboard/config")(&configuration);
+    JsonDocument connectionConfig;
+    check(!deserializeJson(connectionConfig, configuration.body), "configuration JSON");
+    check(connectionConfig["wsPath"].as<String>() == "/custom-ws", "configured WebSocket path exposed");
+    check(configuration.response.headers["Cache-Control"] == "no-store", "configuration is not cached");
     AsyncWebServerRequest request;
     server.route(&request);
     check(request.status == 200 && request.data == html && request.size == sizeof(html), "PROGMEM response");
@@ -158,7 +164,13 @@ int main(int argc, char** argv) {
         sendOta("ota_chunk", R"({"data":"AQID"})");
         sendOta("ota_end", "{}");
         check(Update.bytes == std::vector<uint8_t>({1, 2, 3}), "OTA payload decoded");
-        check(Update.ends == 1 && ESP.restarts == 1 && testDelay == 1000, "OTA completion");
+        check(Update.ends == 1 && ESP.restarts == 0, "OTA verified before restart");
+        JsonDocument acknowledgement;
+        check(!deserializeJson(acknowledgement, client.messages.back()), "OTA acknowledgement JSON");
+        check(acknowledgement["stage"].as<String>() == "complete", "OTA completion confirmed to browser");
+        testMillis += 1000;
+        dashboard.loop();
+        check(ESP.restarts == 1 && testDelay == 0, "OTA restart deferred to loop");
         Update = UpdateStub{};
         Update.shortWrite = true;
         sendOta("ota_start", R"({"size":3})");

@@ -12,7 +12,7 @@ void MessageRouter::initialize(const MessageReply& reply) {
     reply(snapshot(_state, _cards));
 }
 
-void MessageRouter::handle(const uint8_t* bytes, size_t size, const MessageReply& reply) {
+void MessageRouter::handle(const uint8_t* bytes, size_t size, const MessageReply& reply, uint32_t clientId) {
     if (!bytes || size == 0)
         return;
     JsonDocument doc;
@@ -31,14 +31,14 @@ void MessageRouter::handle(const uint8_t* bytes, size_t size, const MessageReply
             const String action = doc["action"].as<String>();
             auto data = doc["data"].as<JsonObject>();
             card->handleAction(action, data);
-            _ota.handle(action, data);
+            _ota.handle(action, data, reply, clientId);
         }
     } else if (type == "command") {
         const String command = doc["command"].as<String>();
         if (_state.onCommand)
             _state.onCommand(command);
     } else {
-        _ota.handle(type, doc.as<JsonObject>());
+        _ota.handle(type, doc.as<JsonObject>(), reply, clientId);
     }
 }
 

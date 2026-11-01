@@ -46,6 +46,42 @@ void begin(AsyncWebServer* server, const uint8_t* htmlData, size_t htmlSize,
 
 > **Note**: OTA and Console functionality are available as **tabs only**, not dashboard cards. Use the `enableOTA` and `enableConsole` parameters to control tab visibility.
 
+The browser reads `GET /esp-dashboard/config` (uncached JSON containing `wsPath`)
+before opening its WebSocket. It uses the page's host and port, and `wss:` for an
+HTTPS page. TLS termination must be supplied by the hosting setup when using HTTPS.
+The server pushes the initial dashboard on connection; the browser requests
+`init` only if that initial message does not arrive within five seconds.
+
+#### OTA acknowledgements
+
+The browser sends `ota_start`, then one `ota_chunk` at a time, then `ota_end`.
+Each request contains an `uploadId` and increasing integer `seq`. The firmware
+responds to the requesting connection with:
+
+```json
+{"type":"ota_status","action":"ota_chunk","uploadId":"example","seq":1,"stage":"progress","received":2048,"size":8192}
+```
+
+Stages are `ready`, `progress`, `complete`, `error` and `aborted`; errors include
+an `error` string. The client waits for each acknowledgement and advances its
+progress from the acknowledged byte count. `complete` is emitted only after
+`Update.end(true)` succeeds. A full progress bar alone does not establish that
+the firmware was verified. The browser times out after ten seconds without an ACK.
+
+An upload belongs to its originating connection. A disconnect or `ota_abort`
+aborts an unfinished upload; `loop()` also aborts after thirty seconds of
+inactivity. Validated firmware restarts from `loop()` at least one second after
+confirmation, allowing the WebSocket callback to return before rebooting.
+The OTA poll does not wait for a firmware write already executing in another task.
+Continue calling `dashboard.loop()` regularly during an upload.
+
+Firmware accepts bounded base64 chunks (at most 4096 encoded characters), rejects
+invalid encoding, out-of-order messages and data exceeding the declared size.
+The UI reads the file in 2048-byte pieces and accepts non-empty `.bin`/`.ota`
+files up to 4 MB; the device's actual OTA partition can impose a lower limit.
+Earlier card-based requests are still accepted; they receive the same status
+messages. An updated UI requires firmware providing these acknowledgements.
+
 > **Note on OTA support (ESP32)**  
 > To use the OTA update tab reliably, your ESP32 must use a partition table that provides **OTA app slots** (e.g. `ota_0`, `ota_1`) with enough space for your firmware.  
 > Common choices in Arduino / PlatformIO are partition schemes like `min_spiffs.csv` or other `*ota*.csv` variants that define at least one OTA partition.

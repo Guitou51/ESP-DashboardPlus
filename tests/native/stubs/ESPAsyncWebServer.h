@@ -14,9 +14,11 @@ struct AwsFrameInfo {
 };
 class AsyncWebSocketClient {
 public:
+    explicit AsyncWebSocketClient(unsigned identifier = 7) : identifier(identifier) {}
+    unsigned identifier;
     std::vector<String> messages;
     unsigned id() const {
-        return 7;
+        return identifier;
     }
     void text(const String& message) {
         messages.push_back(message);
@@ -38,6 +40,9 @@ public:
     }
     void connect(AsyncWebSocketClient& client) {
         handler(this, &client, WS_EVT_CONNECT, nullptr, nullptr, 0);
+    }
+    void disconnect(AsyncWebSocketClient& client) {
+        handler(this, &client, WS_EVT_DISCONNECT, nullptr, nullptr, 0);
     }
     void receive(AsyncWebSocketClient& client, String message, size_t split = 0) {
         AwsFrameInfo frame{true, 0, message.size(), WS_TEXT};
@@ -66,6 +71,7 @@ public:
     String contentType;
     const uint8_t* data = nullptr;
     size_t size = 0;
+    String body;
     AsyncWebServerResponse response;
     AsyncWebServerResponse* beginResponse(int code, const String& type, const uint8_t* content, size_t length) {
         status = code;
@@ -75,6 +81,12 @@ public:
         return &response;
     }
     void send(AsyncWebServerResponse*) {}
+    AsyncWebServerResponse* beginResponse(int code, const String& type, const String& text) {
+        status = code;
+        contentType = type;
+        body = text;
+        return &response;
+    }
 };
 class AsyncWebServer {
 public:
@@ -84,10 +96,13 @@ public:
     }
     AsyncWebSocket* ws = nullptr;
     std::function<void(AsyncWebServerRequest*)> route;
+    std::map<String, std::function<void(AsyncWebServerRequest*)>> routes;
     void addHandler(AsyncWebSocket* socket) {
         ws = socket;
     }
-    template <class T> void on(const String&, int, T callback) {
-        route = callback;
+    template <class T> void on(const String& path, int, T callback) {
+        routes[path] = callback;
+        if (path == "/")
+            route = callback;
     }
 };

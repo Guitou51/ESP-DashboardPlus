@@ -196,6 +196,21 @@ If you modify `extras/dashboard.html`, regenerate the header:
 python scripts/html_to_header.py extras/dashboard.html src/dashboard_html.h
 ```
 
+### Frontend regression tests
+
+With Node.js 18 or newer, install the locked development dependencies and run:
+
+```sh
+npm ci --ignore-scripts
+npm test
+```
+
+The jsdom tests exercise the actual embedded page: safe rendering, delegated
+events, connection lifecycle, offline actions, numeric controls, charts and OTA
+acknowledgements. They do not require a device or add runtime dependencies to the
+dashboard. Native C++ tests run with `python scripts/test_native.py` after building
+the example to install ArduinoJson.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details.

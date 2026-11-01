@@ -13,11 +13,12 @@ namespace detail {
 class AsyncDashboardTransport {
 public:
     using Connected = std::function<void(const MessageReply&)>;
-    using Received = std::function<void(const uint8_t*, size_t, const MessageReply&)>;
+    using Received = std::function<void(const uint8_t*, size_t, const MessageReply&, uint32_t)>;
+    using Disconnected = std::function<void(uint32_t)>;
     AsyncDashboardTransport();
     ~AsyncDashboardTransport();
     void begin(AsyncWebServer* server, const uint8_t* html, size_t size, const String& path, Connected connected,
-               Received received);
+               Received received, Disconnected disconnected = {});
     bool ready() const;
     void broadcast(const String& message);
     void loop();
