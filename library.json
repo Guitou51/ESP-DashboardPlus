@@ -38,14 +38,13 @@
   "build": {
     "libArchive": false,
     "srcFilter": [
-      "+<*.h>",
-      "+<*.cpp>"
+      "+<*>"
     ],
     "extraScript": "scripts/html_to_header_pio.py"
   },
   "export": {
     "include": [
-      "src/*",
+      "src/**",
       "examples/*",
       "docs/*",
       "scripts/*",

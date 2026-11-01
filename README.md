@@ -141,6 +141,7 @@ Full documentation is available at: **[https://aaronbeckmann.github.io/ESP-Dashb
 - [Card Reference](https://aaronbeckmann.github.io/ESP-DashboardPlus/cards)
 - [API Reference](https://aaronbeckmann.github.io/ESP-DashboardPlus/api)
 - [Examples](https://aaronbeckmann.github.io/ESP-DashboardPlus/examples)
+- [Source Architecture](docs/architecture.md)
 
 ## 📁 Library Structure
 
@@ -150,7 +151,10 @@ ESP-DashboardPlus/
 ├── README.md                 # This file
 ├── LICENSE                   # MIT License
 ├── src/
-│   ├── ESPDashboardPlus.h    # Main library header
+│   ├── ESPDashboardPlus.h    # Public facade (declarations)
+│   ├── ESPDashboardPlus.cpp  # Facade implementation and composition
+│   ├── dashboard/           # Registry, JSON, transport and OTA services
+│   │   └── cards/           # One .h/.cpp pair per card
 │   └── dashboard_html.h      # Auto-generated (gzipped HTML)
 ├── extras/
 │   └── dashboard.html        # Source HTML file
@@ -191,6 +195,21 @@ If you modify `extras/dashboard.html`, regenerate the header:
 ```bash
 python scripts/html_to_header.py extras/dashboard.html src/dashboard_html.h
 ```
+
+### Frontend regression tests
+
+With Node.js 18 or newer, install the locked development dependencies and run:
+
+```sh
+npm ci --ignore-scripts
+npm test
+```
+
+The jsdom tests exercise the actual embedded page: safe rendering, delegated
+events, connection lifecycle, offline actions, numeric controls, charts and OTA
+acknowledgements. They do not require a device or add runtime dependencies to the
+dashboard. Native C++ tests run with `python scripts/test_native.py` after building
+the example to install ArduinoJson.
 
 ## 🤝 Contributing
 

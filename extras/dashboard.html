@@ -7,6 +7,14 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     
+    #action-feedback { padding:12px; margin-bottom:16px; color:var(--warning); border:1px solid var(--warning); border-radius:8px; }
+    [data-command]:disabled, [data-command][aria-disabled="true"], #page-console-send:disabled { opacity:0.5; cursor:not-allowed; }
+    .upload-zone.disabled { opacity:0.5; pointer-events:none; }
+    .slider-track { touch-action:none; }
+    .toggle, .dropdown-trigger, .dropdown-item, .color-preset { font-family:inherit; color:inherit; text-align:inherit; }
+    button.toggle { border:0; padding:0; }
+    button.dropdown-trigger, button.dropdown-item { width:100%; }
+    button.dropdown-item { border:0; background:transparent; }
     /* Theme variables - Default is dark, switched via JS */
     :root {
       --bg: #0f1419;
@@ -1457,6 +1465,7 @@
 
     <!-- Main Content Area -->
     <main class="main-content">
+      <div id="action-feedback" role="status" aria-live="polite" hidden></div>
       <!-- Dashboard Tab -->
       <div id="tab-dashboard" class="tab-panel active">
         <div id="dashboard"></div>
@@ -1503,7 +1512,7 @@
                 <span class="console-input-prefix">$</span>
                 <input type="text" class="console-input" id="page-console-input" placeholder="Enter command..." onkeydown="if(event.key==='Enter')sendPageCommand()">
               </div>
-              <button class="console-send-btn" onclick="sendPageCommand()">
+              <button id="page-console-send" class="console-send-btn" onclick="sendPageCommand()">
                 <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                 Send
               </button>
@@ -1543,6 +1552,7 @@
                 <span id="page-progress-status">Uploading...</span>
                 <span id="page-progress-pct">0%</span>
               </div>
+              <button id="page-ota-cancel" class="btn btn-secondary" onclick="cancelOtaUpload()" hidden>Cancel upload</button>
             </div>
           </div>
         </div>
@@ -1580,7 +1590,7 @@
   <script>
     // WebSocket Connection
     let ws = null;
-    let cards = {};
+    let cards = Object.create(null);
     let groups = [];
     let reconnectTimeout = null;
     let lastMessageTime = null;
@@ -1590,111 +1600,181 @@
     let enableOTA = true;
     let enableConsole = true;
 
-    function connect() {
-      // Close existing connection if any
-      if (ws) {
-        ws.close();
-        ws = null;
+    let connectionGeneration = 0;
+    let dashboardReady = false;
+    let initTimeout = null;
+    let connectionLabel = null;
+
+    function isCommandReady() {
+      return !!ws && ws.readyState === WebSocket.OPEN && dashboardReady;
+    }
+
+    function showActionError(message) {
+      const feedback = document.getElementById('action-feedback');
+      feedback.textContent = message;
+      feedback.hidden = false;
+    }
+
+    function clearActionError() {
+      document.getElementById('action-feedback').hidden = true;
+    }
+
+    function applyControlAvailability() {
+      const ready = isCommandReady();
+      document.querySelectorAll('.card [data-command], #page-console-send, #modalConfirm').forEach(control => {
+        control.disabled = !ready;
+        control.setAttribute('aria-disabled', String(!ready));
+      });
+      const busy = typeof otaSession !== 'undefined' && otaSession?.active;
+      document.getElementById('page-ota-file').disabled = !ready || !!busy;
+      document.getElementById('page-upload-zone').classList.toggle('disabled', !ready || !!busy);
+    }
+
+    function sendMessage(message, socket = ws) {
+      if (!isCommandReady() || socket !== ws) {
+        showActionError('Disconnected: the command was not sent.');
+        return false;
       }
-      // Clear any existing reconnection timeout
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
+      try {
+        if (socket.bufferedAmount > 65536) throw new Error('The connection is busy. Please try again.');
+        socket.send(JSON.stringify(message));
+        clearActionError();
+        return true;
+      } catch (error) {
+        showActionError(error.message || 'The command could not be sent.');
+        return false;
+      }
+    }
+
+    function websocketUrl(path) {
+      if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
+        throw new Error('Invalid WebSocket path received from the device.');
+      }
+      const url = new URL(path, window.location.href);
+      if (url.origin !== window.location.origin) throw new Error('Invalid WebSocket origin.');
+      url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return url.href;
+    }
+
+    async function loadWebSocketPath() {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch('/esp-dashboard/config', { cache: 'no-store', signal: controller.signal });
+        if (response.status === 404) return '/ws'; // Compatibility with earlier firmware.
+        if (!response.ok) throw new Error('Cannot read the device connection configuration.');
+        const config = await response.json();
+        return config.wsPath;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    function scheduleReconnect(generation) {
+      if (generation !== connectionGeneration || reconnectTimeout !== null) return;
+      reconnectTimeout = setTimeout(() => {
         reconnectTimeout = null;
+        connect();
+      }, 3000);
+    }
+
+    async function connect() {
+      const generation = ++connectionGeneration;
+      cancelSlider();
+      failActiveOta('Connection reset: firmware update was not confirmed.');
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+      clearTimeout(initTimeout);
+      clearInterval(messageTimeoutCheck);
+      messageTimeoutCheck = null;
+      dashboardReady = false;
+      if (ws) {
+        const old = ws;
+        ws = null;
+        old.onopen = old.onclose = old.onmessage = old.onerror = null;
+        old.close();
       }
-      updateStatus(false);
-      const wsUrl = 'ws://' + window.location.hostname + '/ws';
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        console.log('[Dashboard] Connected');
-        updateStatus(true);
+      updateStatus('connecting');
+      let path;
+      try {
+        path = await loadWebSocketPath();
+        if (generation !== connectionGeneration) return;
+        ws = new WebSocket(websocketUrl(path));
+      } catch (error) {
+        if (generation !== connectionGeneration) return;
+        showActionError(error.message || 'Cannot connect to the device.');
+        updateStatus('disconnected');
+        scheduleReconnect(generation);
+        return;
+      }
+      const socket = ws;
+      const current = () => generation === connectionGeneration && socket === ws;
+      socket.onopen = () => {
+        if (!current()) return;
         lastMessageTime = Date.now();
-        // Clear any pending reconnection
-        if (reconnectTimeout) {
-          clearTimeout(reconnectTimeout);
-          reconnectTimeout = null;
-        }
-        // Start checking for message timeout
-        if (messageTimeoutCheck) clearInterval(messageTimeoutCheck);
-        messageTimeoutCheck = setInterval(() => {
-          if (lastMessageTime && Date.now() - lastMessageTime > 5000) {
-            updateStatus(false);
-            // Try to reconnect if WebSocket is closed, closing, or not receiving messages
-            if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-              console.log('[Dashboard] WebSocket closed, attempting to reconnect...');
-              if (reconnectTimeout) clearTimeout(reconnectTimeout);
-              reconnectTimeout = setTimeout(connect, 3000);
-            } else if (ws.readyState === WebSocket.OPEN) {
-              // WebSocket appears open but not receiving messages - close and reconnect
-              console.log('[Dashboard] No messages received, closing and reconnecting...');
-              ws.close();
-              if (reconnectTimeout) clearTimeout(reconnectTimeout);
-              reconnectTimeout = setTimeout(connect, 3000);
-            }
+        // The server pushes init on connect. Request it only as a compatibility fallback.
+        initTimeout = setTimeout(() => {
+          if (current() && !dashboardReady && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'init' }));
           }
+        }, 5000);
+        messageTimeoutCheck = setInterval(() => {
+          if (current() && Date.now() - lastMessageTime > 15000) socket.close();
         }, 1000);
-        ws.send(JSON.stringify({ type: 'init' }));
       };
-
-      ws.onclose = () => {
-        console.log('[Dashboard] Disconnected');
-        updateStatus(false);
-        lastMessageTime = null;
-        if (messageTimeoutCheck) {
-          clearInterval(messageTimeoutCheck);
-          messageTimeoutCheck = null;
-        }
-        reconnectTimeout = setTimeout(connect, 3000);
+      socket.onclose = () => {
+        if (!current()) return;
+        dashboardReady = false;
+        clearTimeout(initTimeout);
+        clearInterval(messageTimeoutCheck);
+        messageTimeoutCheck = null;
+        cancelSlider();
+        failActiveOta('Connection lost: firmware update was not confirmed.');
+        updateStatus('disconnected');
+        scheduleReconnect(generation);
       };
-
-      ws.onerror = (err) => {
-        console.error('[Dashboard] Error:', err);
+      socket.onerror = () => {
+        if (current()) socket.close();
       };
-
-      ws.onmessage = (event) => {
+      socket.onmessage = event => {
+        if (!current()) return;
         try {
-          const msg = JSON.parse(event.data);
-          handleMessage(msg);
-        } catch (e) {
-          console.error('[Dashboard] Parse error:', e);
+          const message = JSON.parse(event.data);
+          if (!message || typeof message.type !== 'string') return;
+          lastMessageTime = Date.now();
+          handleMessage(message);
+        } catch (error) {
+          console.error('[Dashboard] Invalid message:', error);
         }
       };
     }
 
-    function updateStatus(connected) {
-      const el = document.getElementById('connectionStatus');
-      el.className = 'status' + (connected ? '' : ' disconnected');
-      el.innerHTML = connected ? `
-        <div class="pulse-dot"></div>
-        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--success)">
-          <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
-          <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
-          <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
-          <circle cx="12" cy="20" r="1"></circle>
-        </svg>
-        <span>Connected</span>
-      ` : `
-        <div class="pulse-dot"></div>
-        <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--danger)">
-          <line x1="1" y1="1" x2="23" y2="23"></line>
-          <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"></path>
-          <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"></path>
-          <path d="M10.71 5.05A16 16 0 0 1 22.58 9"></path>
-          <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"></path>
-          <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
-          <circle cx="12" cy="20" r="1"></circle>
-        </svg>
-        <span>Disconnected</span>
-      `;
+    function updateStatus(state) {
+      const label = state === true ? 'connected' : state === false ? 'disconnected' : state;
+      if (connectionLabel !== label) {
+        connectionLabel = label;
+        const element = document.getElementById('connectionStatus');
+        element.className = 'status' + (label === 'connected' ? '' : ' disconnected');
+        element.innerHTML = '<div class="pulse-dot"></div><span></span>';
+        element.querySelector('span').textContent = label === 'connected' ? 'Connected' : label === 'connecting' ? 'Connecting...' : 'Disconnected';
+      }
+      applyControlAvailability();
     }
 
     function handleMessage(msg) {
       // Update last message time and status
       lastMessageTime = Date.now();
-      updateStatus(true);
       
       switch (msg.type) {
         case 'init':
+          dashboardReady = true;
+          clearTimeout(initTimeout);
+          clearActionError();
+          if (otaSession?.complete) {
+            document.getElementById('page-upload-zone').style.display = '';
+            document.getElementById('page-ota-progress').style.display = 'none';
+            document.getElementById('page-ota-file').value = '';
+          }
           // Handle dashboard title from server
           if (msg.title) {
             setDashboardTitle(msg.title, msg.subtitle);
@@ -1710,7 +1790,7 @@
           updateTabVisibility();
           
           if (msg.cards) {
-            cards = {};
+            cards = Object.create(null);
             msg.cards.forEach(card => { cards[card.id] = card; });
           }
           
@@ -1722,6 +1802,7 @@
           }
           
           renderDashboard();
+          updateStatus('connected');
           
           // Update OTA info if provided
           if (msg.version) {
@@ -1735,7 +1816,7 @@
           break;
         case 'update':
           if (msg.cardId && cards[msg.cardId]) {
-            Object.assign(cards[msg.cardId].config, msg.data);
+            cards[msg.cardId].config = Object.assign(Object.create(null), cards[msg.cardId].config, msg.data);
             updateCard(msg.cardId);
           }
           break;
@@ -1755,6 +1836,9 @@
           // Global log message from server
           addPageLog(msg.level || 'info', msg.message || '');
           break;
+        case 'ota_status':
+          handleOtaStatus(msg);
+          break;
         case 'heartbeat':
           // Just keep-alive
           break;
@@ -1769,7 +1853,7 @@
       
       if (sidebarConsole) sidebarConsole.style.display = enableConsole ? '' : 'none';
       if (mobileConsole) mobileConsole.style.display = enableConsole ? '' : 'none';
-      if (!enableConsole && tabConsole) tabConsole.style.display = 'none';
+      if (tabConsole) tabConsole.style.display = enableConsole ? '' : 'none';
       
       // Hide/show OTA tab
       const sidebarOta = document.getElementById('sidebar-nav-ota');
@@ -1778,14 +1862,12 @@
       
       if (sidebarOta) sidebarOta.style.display = enableOTA ? '' : 'none';
       if (mobileOta) mobileOta.style.display = enableOTA ? '' : 'none';
-      if (!enableOTA && tabOta) tabOta.style.display = 'none';
+      if (tabOta) tabOta.style.display = enableOTA ? '' : 'none';
+      if ((!enableConsole && currentTab === 'console') || (!enableOTA && currentTab === 'ota')) switchTab('dashboard');
     }
 
     function sendAction(cardId, action, data = {}) {
-      console.log(`[Dashboard] Sending action: ${action} for card: ${cardId}`, data);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'action', cardId, action, data }));
-      }
+      return sendMessage({ type: 'action', cardId, action, data });
     }
 
     function renderDashboard() {
@@ -1809,7 +1891,7 @@
           .filter(Boolean);
         const sortedGroupCards = sortByWeight(groupCards);
         
-        html += `<div class="section-title">${group.title}</div>`;
+        html += `<div class="section-title">${escapeHtml(group.title)}</div>`;
         html += '<div class="grid">';
         sortedGroupCards.forEach(card => {
           html += renderCard(card);
@@ -1832,20 +1914,70 @@
       }
       
       dashboard.innerHTML = html;
-      initializeCards();
+      applyControlAvailability();
+    }
+
+    const cardVariants = new Set(['primary', 'success', 'warning', 'danger', 'info', 'secondary']);
+
+    function resolveColor(value) {
+      if (cardVariants.has(value)) return value === 'secondary' ? 'var(--text-muted)' : `var(--${value})`;
+      return typeof value === 'string' && /^#(?:[\da-f]{3,4}|[\da-f]{6}|[\da-f]{8})$/i.test(value) ? value : 'var(--primary)';
+    }
+
+    function safeHref(value) {
+      try {
+        const url = new URL(typeof value === 'string' ? value : '#', window.location.href);
+        return ['http:', 'https:', 'mailto:', 'tel:'].includes(url.protocol) ? url.href : '#';
+      } catch { return '#'; }
+    }
+
+    function finiteNumber(value, fallback = 0) {
+      return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+    }
+
+    function getCardElement(id) {
+      return Array.from(document.querySelectorAll('.card[data-id]')).find(element => element.dataset.id === id) || null;
+    }
+
+    function renderConfig(raw, type) {
+      const config = Object.assign(Object.create(null), raw);
+      Object.keys(config).forEach(key => {
+        if (typeof config[key] === 'string') config[key] = escapeHtml(config[key]);
+        else if (config[key] !== null && typeof config[key] === 'object' && !['options', 'presets', 'series', 'data', 'thresholds'].includes(key)) config[key] = '';
+      });
+      config.variant = cardVariants.has(raw.variant) ? raw.variant : 'primary';
+      config.url = escapeHtml(safeHref(raw.url));
+      config.target = ['_blank', '_self', '_parent', '_top'].includes(raw.target) ? raw.target : '_blank';
+      config.trend = ['up', 'down'].includes(raw.trend) ? raw.trend : '';
+      config.options = Array.isArray(raw.options) ? raw.options.filter(option => option && typeof option === 'object').map(option => ({
+        value: escapeHtml(option.value), label: escapeHtml(option.label)
+      })) : [];
+      config.presets = (Array.isArray(raw.presets) ? raw.presets : ['#00D4AA','#22C55E','#F59E0B','#EF4444','#FFFFFF'])
+        .filter(color => typeof color === 'string' && /^#[\da-f]{6}$/i.test(color));
+      if (type === 'color') config.value = typeof raw.value === 'string' && /^#[\da-f]{6}$/i.test(raw.value) ? raw.value : '#00D4AA';
+      if (type === 'input') config.inputType = typeof raw.inputType === 'string' ? escapeHtml(raw.inputType) : 'text';
+      if (type === 'location') {
+        config.latitude = finiteNumber(raw.latitude);
+        config.longitude = finiteNumber(raw.longitude);
+      }
+      return config;
+    }
+
+    function rangePercent(config) {
+      const min = finiteNumber(config.min), max = finiteNumber(config.max, 100);
+      return max > min ? Math.max(0, Math.min(100, (finiteNumber(config.value) - min) / (max - min) * 100)) : 0;
     }
 
     function getCardSizeStyle(config) {
-      const sizeX = config.sizeX || 1;
-      const sizeY = config.sizeY || 1;
-      let style = '';
-      if (sizeX > 1) style += `grid-column: span ${sizeX};`;
-      if (sizeY > 1) style += `grid-row: span ${sizeY};`;
-      return style;
+      const x = Math.max(1, Math.trunc(finiteNumber(config.sizeX, 1)));
+      const y = Math.max(1, Math.trunc(finiteNumber(config.sizeY, 1)));
+      return (x > 1 ? `grid-column: span ${x};` : '') + (y > 1 ? `grid-row: span ${y};` : '');
     }
 
     function renderCard(card) {
-      const { id, type, config } = card;
+      const { type } = card;
+      const id = escapeHtml(card.id);
+      const config = renderConfig(card.config || {}, type);
       const sizeStyle = getCardSizeStyle(config);
 
       switch (type) {
@@ -1854,7 +1986,7 @@
             <div class="card" data-id="${id}" style="${sizeStyle}"><div class="update-indicator"></div>
               <div class="card-title">${config.title || 'Value'}</div>
               <div>
-                <span class="stat-value">${config.value || 0}</span>
+                <span class="stat-value">${config.value ?? 0}</span>
                 <span class="stat-unit">${config.unit || ''}</span>
               </div>
               ${config.trend ? `<div class="stat-trend ${config.trend}">${config.trend === 'up' ? '↑' : '↓'} ${config.trendValue || ''}</div>` : ''}
@@ -1899,9 +2031,9 @@
                 <div class="chart-container">
                   <svg class="chart-svg" viewBox="0 0 100 70" preserveAspectRatio="none">
                     <defs>
-                      ${renderChartGradients(id, config)}
+                      ${renderChartGradients(card.id, config)}
                     </defs>
-                    ${renderChartContent(id, config)}
+                    ${renderChartContent(card.id, config)}
                   </svg>
                 </div>
                 <div class="chart-x-axis">
@@ -1915,7 +2047,7 @@
           return `
             <div class="card" data-id="${id}" style="${sizeStyle}"><div class="update-indicator"></div>
               <div class="card-title">${config.title || 'Button'}</div>
-              <button class="btn btn-${config.variant || 'primary'}" onclick="sendAction('${id}', 'click')">
+              <button class="btn btn-${config.variant || 'primary'}" data-action="click" data-command>
                 ${config.icon ? `<span>${config.icon}</span>` : ''}
                 ${config.label || 'Click'}
               </button>
@@ -1926,7 +2058,7 @@
           return `
             <div class="card" data-id="${id}" style="${sizeStyle}"><div class="update-indicator"></div>
               <div class="card-title">${config.title || 'Link'}</div>
-              <a href="${config.url || '#'}" target="${config.target || '_blank'}" class="btn btn-${config.variant || 'primary'}" ${config.url ? '' : 'onclick="event.preventDefault()"'}>
+              <a href="${config.url || '#'}" target="${config.target || '_blank'}" class="btn btn-${config.variant || 'primary'}" rel="noopener noreferrer">
                 ${config.icon ? `<span>${config.icon}</span>` : ''}
                 ${config.label || 'Open Link'}
                 <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
@@ -1941,7 +2073,7 @@
               <div style="margin-bottom:12px">
                 <span class="stat-value" style="font-size:1.25rem" id="tz-display-${id}">${config.value || 'Not set'}</span>
               </div>
-              <button class="btn btn-${config.variant || 'info'}" onclick="getTimezone('${id}')">
+              <button class="btn btn-${config.variant || 'info'}" data-action="timezone" data-command>
                 <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
                 ${config.label || 'Get Browser Timezone'}
               </button>
@@ -1952,7 +2084,7 @@
           return `
             <div class="card" data-id="${id}" style="${sizeStyle}"><div class="update-indicator"></div>
               <div class="card-title">${config.title || 'Date'}</div>
-              <input type="${config.includeTime ? 'datetime-local' : 'date'}" class="date-input" id="date-${id}" value="${config.value || ''}" onchange="changeDate('${id}', this.value)" ${config.min ? `min="${config.min}"` : ''} ${config.max ? `max="${config.max}"` : ''}>
+              <input type="${config.includeTime ? 'datetime-local' : 'date'}" class="date-input" id="date-${id}" value="${config.value || ''}" data-change="date" data-command ${config.min ? `min="${config.min}"` : ''} ${config.max ? `max="${config.max}"` : ''}>
             </div>
           `;
           
@@ -1960,7 +2092,7 @@
           return `
             <div class="card" data-id="${id}" style="${sizeStyle}"><div class="update-indicator"></div>
               <div class="card-title">${config.title || 'Time'}</div>
-              <input type="time" class="date-input" id="time-${id}" value="${config.value || ''}" ${config.includeSeconds ? 'step="1"' : ''} onchange="changeTime('${id}', this.value)">
+              <input type="time" class="date-input" id="time-${id}" value="${config.value || ''}" ${config.includeSeconds ? 'step="1"' : ''} data-change="time" data-command>
             </div>
           `;
           
@@ -1977,20 +2109,20 @@
               <div id="loc-error-${id}" style="display:none;color:var(--warning);font-size:0.75rem;margin-bottom:8px;padding:8px;background:var(--warning-glow);border-radius:6px"></div>
               <div id="loc-manual-${id}" style="display:none;margin-bottom:12px">
                 <div style="margin-bottom:8px">
-                  <input type="number" step="any" placeholder="Latitude" id="loc-lat-${id}" class="input" style="width:100%" value="${config.latitude || ''}">
-                  <input type="number" step="any" placeholder="Longitude" id="loc-lon-${id}" class="input" style="width:100%" value="${config.longitude || ''}">
+                  <input type="number" step="any" placeholder="Latitude" id="loc-lat-${id}" class="input" style="width:100%" value="${config.latitude ?? ''}">
+                  <input type="number" step="any" placeholder="Longitude" id="loc-lon-${id}" class="input" style="width:100%" value="${config.longitude ?? ''}">
                 </div>
-                <button class="btn btn-success" onclick="setManualLocation('${id}')" style="width:100%">
+                <button class="btn btn-success" data-action="location-set" data-command style="width:100%">
                   <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
                   Set Coordinates
                 </button>
               </div>
               <div style="display:flex;gap:8px">
-                <button class="btn btn-${config.variant || 'info'}" onclick="getLocation('${id}')">
+                <button class="btn btn-${config.variant || 'info'}" data-action="location" data-command>
                   <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 6.9 8 11.7z"/></svg>
                   ${config.label || 'Get Location'}
                 </button>
-                <button class="btn btn-secondary" onclick="toggleManualLocation('${id}')" title="Enter manually">
+                <button class="btn btn-secondary" data-action="location-manual" data-command title="Enter manually">
                   <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
                 </button>
               </div>
@@ -2005,28 +2137,28 @@
                   <div class="card-title">${config.title || 'Toggle'}</div>
                   <div style="font-size:1.1rem;font-weight:600;margin-top:6px">${config.label || ''}</div>
                 </div>
-                <div class="toggle ${config.value ? 'on' : ''}" onclick="toggleSwitch('${id}')">
+                <button type="button" class="toggle ${config.value ? 'on' : ''}" data-action="toggle" data-command>
                   <div class="toggle-knob"></div>
-                </div>
+                </button>
               </div>
             </div>
           `;
           
         case 'slider':
-          const pct = ((config.value - (config.min || 0)) / ((config.max || 100) - (config.min || 0))) * 100;
+          const pct = rangePercent(config);
           return `
             <div class="card" data-id="${id}" style="${sizeStyle}">
               <div class="slider-header">
                 <div class="card-title">${config.title || 'Slider'}</div>
-                <div><span class="slider-value">${config.value || 0}</span><span class="stat-unit">${config.unit || ''}</span></div>
+                <div><span class="slider-value">${config.value ?? 0}</span><span class="stat-unit">${config.unit || ''}</span></div>
               </div>
-              <div class="slider-track" onmousedown="startSlider(event, '${id}', ${config.min || 0}, ${config.max || 100})" ontouchstart="startSliderTouch(event, '${id}', ${config.min || 0}, ${config.max || 100})">
+              <div class="slider-track" data-action="slider" data-command>
                 <div class="slider-fill" style="width:${pct}%"></div>
                 <div class="slider-thumb" style="left:calc(${pct}% - 12px)"></div>
               </div>
               <div class="slider-labels">
-                <span>${config.min || 0}${config.unit || ''}</span>
-                <span>${config.max || 100}${config.unit || ''}</span>
+                <span>${config.min ?? 0}${config.unit || ''}</span>
+                <span>${config.max ?? 100}${config.unit || ''}</span>
               </div>
             </div>
           `;
@@ -2036,8 +2168,8 @@
             <div class="card" data-id="${id}" style="${sizeStyle}">
               <div class="card-title">${config.title || 'Input'}</div>
               <div class="input-group">
-                <input type="${config.inputType || 'text'}" class="input" placeholder="${config.placeholder || ''}" value="${config.value || ''}" id="input-${id}" ${config.inputType === 'number' ? `min="${config.min || ''}" max="${config.max || ''}" step="${config.step || 1}"` : ''}>
-                <button class="input-btn" onclick="submitInput('${id}')">
+                <input type="${config.inputType || 'text'}" class="input" placeholder="${config.placeholder || ''}" value="${config.value || ''}" id="input-${id}" ${config.inputType === 'number' ? `min="${config.min ?? ''}" max="${config.max ?? ''}" step="${config.step ?? 1}"` : ''}>
+                <button class="input-btn" data-action="submit" data-command>
                   <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="22" y1="2" x2="11" y2="13"></line>
                     <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
@@ -2053,12 +2185,12 @@
               <div class="card-title">${config.title || 'Color'}</div>
               <div class="color-row">
                 <div class="color-preview" style="background:${config.value || '#00D4AA'};box-shadow:0 4px 24px ${config.value || '#00D4AA'}50"></div>
-                <input type="color" class="color-picker-input" value="${config.value || '#00D4AA'}" onchange="changeColor('${id}', this.value)">
+                <input type="color" class="color-picker-input" value="${config.value || '#00D4AA'}" data-change="color" data-command>
                 <div style="font-family:monospace;font-size:0.85rem;color:var(--text-muted)">${config.value || '#00D4AA'}</div>
               </div>
               <div class="color-presets">
                 ${(config.presets || ['#00D4AA','#22C55E','#F59E0B','#F97316','#EF4444','#EC4899','#8B5CF6','#3B82F6','#06B6D4','#FFFFFF']).map(c => 
-                  `<div class="color-preset ${config.value === c ? 'active' : ''}" style="background:${c};${config.value === c ? 'box-shadow:0 0 12px '+c : ''}" onclick="changeColor('${id}', '${c}')"></div>`
+                  `<button type="button" class="color-preset ${config.value === c ? 'active' : ''}" style="background:${c};${config.value === c ? 'box-shadow:0 0 12px '+c : ''}" data-action="color-preset" data-color="${c}" data-command></button>`
                 ).join('')}
               </div>
             </div>
@@ -2070,16 +2202,16 @@
             <div class="card" data-id="${id}" style="${sizeStyle}">
               <div class="card-title">${config.title || 'Select'}</div>
               <div class="dropdown" id="dropdown-${id}">
-                <div class="dropdown-trigger" onclick="toggleDropdown('${id}')">
+                <button type="button" class="dropdown-trigger" data-action="dropdown" data-command>
                   <span>${selectedOpt?.label || config.placeholder || 'Select...'}</span>
                   <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                </div>
+                </button>
                 <div class="dropdown-menu">
                   ${(config.options || []).map(o => `
-                    <div class="dropdown-item ${config.value === o.value ? 'active' : ''}" onclick="selectDropdown('${id}', '${o.value}')">
+                    <button type="button" class="dropdown-item ${config.value === o.value ? 'active' : ''}" data-action="select" data-value="${o.value}" data-command>
                       <span>${o.label}</span>
                       ${config.value === o.value ? '<svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>' : ''}
-                    </div>
+                    </button>
                   `).join('')}
                 </div>
               </div>
@@ -2090,7 +2222,7 @@
           return `
             <div class="card" data-id="${id}" style="${sizeStyle}">
               <div class="card-title">${config.title || 'Action'}</div>
-              <button class="btn btn-${config.variant || 'warning'}" onclick="showConfirmModal('${id}', '${(config.confirmTitle || 'Confirm').replace(/'/g, "\\'")}', '${(config.confirmMessage || 'Are you sure?').replace(/'/g, "\\'")}')">
+              <button class="btn btn-${config.variant || 'warning'}" data-action="confirm" data-command>
                 ${config.icon ? `<span>${config.icon}</span>` : ''}
                 ${config.label || 'Confirm Action'}
               </button>
@@ -2098,12 +2230,12 @@
           `;
           
         case 'gauge':
-          const gaugePct = ((config.value - (config.min || 0)) / ((config.max || 100) - (config.min || 0))) * 100;
+          const gaugePct = rangePercent(config);
           const angle = (gaugePct / 100) * 180 - 90;
           const arcLength = 251.2;
           const dashOffset = arcLength - (gaugePct / 100) * arcLength;
-          const gaugeColor = config.value >= (config.thresholds?.danger || 90) ? 'var(--danger)' : 
-                            config.value >= (config.thresholds?.warning || 70) ? 'var(--warning)' : 'var(--primary)';
+          const gaugeColor = config.value >= (config.thresholds?.danger ?? 90) ? 'var(--danger)' :
+                            config.value >= (config.thresholds?.warning ?? 70) ? 'var(--warning)' : 'var(--primary)';
           return `
             <div class="card" data-id="${id}" style="${sizeStyle}">
               <div class="card-title" style="text-align:center">${config.title || 'Gauge'}</div>
@@ -2118,8 +2250,8 @@
                   </g>
                 </svg>
                 <div class="gauge-value-container">
-                  <span class="gauge-value" style="color:${gaugeColor}">${config.value || 0}</span>
-                  <span class="stat-unit">${config.unit || '%'}</span>
+                  <span class="gauge-value" style="color:${gaugeColor}">${config.value ?? 0}</span>
+                  <span class="stat-unit">${config.unit ?? '%'}</span>
                 </div>
               </div>
             </div>
@@ -2131,194 +2263,116 @@
           return ''; // These card types are only available as tabs
           
         default:
-          return `<div class="card" data-id="${id}" style="${sizeStyle}"><div class="card-title">Unknown: ${type}</div></div>`;
+          return `<div class="card" data-id="${id}" style="${sizeStyle}"><div class="card-title">Unknown: ${escapeHtml(type)}</div></div>`;
       }
     }
 
-    function getChartAxisData(config) {
-      const series = config.series || [];
-      const legacyData = config.data || [];
-      
-      let allSeries = [];
-      if (series.length > 0) {
-        allSeries = series;
-      } else if (legacyData.length > 0) {
-        allSeries = [{ name: '', color: config.color || 'primary', data: legacyData }];
-      }
-      
-      // Find global min/max
-      let globalMin = Infinity, globalMax = -Infinity;
-      let maxDataPoints = 0;
-      allSeries.forEach(s => {
-        maxDataPoints = Math.max(maxDataPoints, s.data.length);
-        s.data.forEach(v => {
-          if (v < globalMin) globalMin = v;
-          if (v > globalMax) globalMax = v;
-        });
-      });
-      
-      if (!isFinite(globalMin)) globalMin = 0;
-      if (!isFinite(globalMax)) globalMax = 100;
-      
-      // Format axis values
-      const formatVal = (v) => {
-        if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1) + 'k';
-        if (Math.abs(v) >= 1) return v.toFixed(1);
-        return v.toFixed(2);
-      };
-      
-      // X-axis time labels (N-Ns format)
-      const xLabels = [];
-      const numLabels = Math.min(5, maxDataPoints);
-      if (maxDataPoints > 1) {
-        for (let i = 0; i < numLabels; i++) {
-          const idx = Math.floor(i * (maxDataPoints - 1) / (numLabels - 1));
-          const offset = maxDataPoints - 1 - idx;
-          xLabels.push(offset === 0 ? 'N' : `N-${offset}`);
-        }
-      } else {
-        xLabels.push('N');
-      }
-      
-      return {
-        minLabel: formatVal(globalMin),
-        maxLabel: formatVal(globalMax),
-        midLabel: formatVal((globalMin + globalMax) / 2),
-        xLabels: xLabels
-      };
+    function chartToken(id) {
+      return Array.from(String(id), character => character.codePointAt(0).toString(16)).join('-');
     }
-    
+
+    function getChartModel(config) {
+      const type = ['line', 'area', 'bar', 'scatter', 'step'].includes(config.chartType) ? config.chartType : 'line';
+      const sources = Array.isArray(config.series) && config.series.length
+        ? config.series : [{ name: '', color: config.color || 'primary', data: config.data }];
+      const series = sources.filter(source => source && typeof source === 'object').map(source => ({
+        name: source.name, color: resolveColor(source.color),
+        data: Array.isArray(source.data) ? source.data.map(value => Number.isFinite(value) ? value : null) : []
+      }));
+      const values = series.flatMap(source => source.data).filter(value => value !== null);
+      const count = series.reduce((maximum, source) => Math.max(maximum, source.data.length), 0);
+      let min = values.length ? Infinity : 0;
+      let max = values.length ? -Infinity : 100;
+      values.forEach(value => { min = Math.min(min, value); max = Math.max(max, value); });
+      if (type === 'bar') { min = Math.min(0, min); max = Math.max(0, max); }
+      if (min === max) {
+        const padding = Math.max(Math.abs(min) * 0.1, 1);
+        if (type === 'bar') max = min + padding;
+        else { min -= padding; max += padding; }
+      }
+      return { type, series, count, min, max };
+    }
+
+    function getChartAxisData(config) {
+      const { min, max, count } = getChartModel(config);
+      const format = value => Math.abs(value) >= 1000 ? (value / 1000).toFixed(1) + 'k'
+        : Math.abs(value) >= 1 ? value.toFixed(1) : value.toFixed(2);
+      const xLabels = [];
+      for (let i = 0, labels = Math.min(5, count); i < labels; ++i) {
+        const offset = count - 1 - Math.floor(i * (count - 1) / (labels - 1 || 1));
+        xLabels.push(offset ? `N-${offset}` : 'N');
+      }
+      return { minLabel: format(min), midLabel: format((min + max) / 2), maxLabel: format(max), xLabels: xLabels.length ? xLabels : ['N'] };
+    }
+
     function renderChartContent(id, config) {
-      const series = config.series || [];
-      const legacyData = config.data || [];
-      const chartType = config.chartType || 'line';
-      const padding = 5;
-      const height = 60;
-      
-      // Determine data sources
-      let allSeries = [];
-      if (series.length > 0) {
-        allSeries = series;
-      } else if (legacyData.length > 0) {
-        allSeries = [{ name: '', color: config.color || 'primary', data: legacyData }];
-      }
-      
-      if (allSeries.length === 0 || allSeries.every(s => s.data.length === 0)) return '';
-      
-      // Find global min/max across all series
-      let globalMin = Infinity, globalMax = -Infinity;
-      allSeries.forEach(s => {
-        s.data.forEach(v => {
-          if (v < globalMin) globalMin = v;
-          if (v > globalMax) globalMax = v;
-        });
-      });
-      const range = globalMax - globalMin || 1;
-      
-      // Grid lines
-      let svg = `<g class="chart-grid">`;
-      for (let i = 0; i <= 4; i++) {
-        const y = padding + (i / 4) * (height - padding * 2);
-        svg += `<line x1="${padding}" y1="${y}" x2="${100-padding}" y2="${y}"/>`;
-      }
-      svg += `</g>`;
-      
-      // Render each series
-      allSeries.forEach((s, seriesIdx) => {
-        const data = s.data;
-        if (data.length === 0) return;
-        
-        const color = `var(--${s.color || 'primary'})`;
-        
-        const points = data.map((v, i) => ({
-          x: padding + (i / (data.length - 1 || 1)) * (100 - padding * 2),
-          y: height - padding - ((v - globalMin) / range) * (height - padding * 2),
-          value: v
+      const model = getChartModel(config);
+      if (!model.count) return '';
+      const y = value => 55 - (value - model.min) / (model.max - model.min) * 50;
+      let svg = '<g class="chart-grid">';
+      for (let i = 0; i <= 4; ++i) svg += `<line x1="5" y1="${5 + i * 12.5}" x2="95" y2="${5 + i * 12.5}"/>`;
+      svg += '</g>';
+      model.series.forEach((source, seriesIndex) => {
+        const offset = model.count - source.data.length;
+        const points = source.data.map((value, index) => value === null ? null : ({
+          x: 5 + (offset + index) / (model.count - 1 || 1) * 90, y: y(value), value, index: offset + index
         }));
-        
-        if (chartType === 'bar') {
-          const totalBars = allSeries.reduce((sum, ss) => Math.max(sum, ss.data.length), 0);
-          const groupWidth = (100 - padding * 2) / totalBars;
-          const barWidth = groupWidth * 0.7 / allSeries.length;
-          const gap = groupWidth * 0.15;
-          data.forEach((v, i) => {
-            const barHeight = ((v - globalMin) / range) * (height - padding * 2);
-            const x = padding + i * groupWidth + gap + seriesIdx * barWidth;
-            const y = height - padding - barHeight;
-            svg += `<rect class="chart-bar" x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="2" style="fill:${color}"/>`;
+        if (model.type === 'bar') {
+          const groupWidth = 90 / model.count;
+          const barWidth = groupWidth * 0.7 / model.series.length;
+          points.filter(Boolean).forEach(point => {
+            const baseline = y(0);
+            svg += `<rect class="chart-bar" x="${5 + point.index * groupWidth + groupWidth * 0.15 + seriesIndex * barWidth}" y="${Math.min(point.y, baseline)}" width="${barWidth}" height="${Math.abs(baseline - point.y)}" rx="2" style="fill:${source.color}"/>`;
           });
-        } else if (chartType === 'scatter') {
-          points.forEach(p => {
-            svg += `<circle class="chart-point" cx="${p.x}" cy="${p.y}" r="4" style="fill:${color}"/>`;
+          return;
+        }
+        if (model.type !== 'scatter') {
+          const segments = [];
+          let segment = [];
+          points.forEach(point => {
+            if (point) segment.push(point);
+            else if (segment.length) { segments.push(segment); segment = []; }
           });
-        } else if (chartType === 'step') {
-          let path = `M ${points[0].x} ${points[0].y}`;
-          for (let i = 1; i < points.length; i++) {
-            path += ` H ${points[i].x} V ${points[i].y}`;
-          }
-          svg += `<path class="chart-path" d="${path}" style="stroke:${color}"/>`;
-          points.forEach(p => {
-            svg += `<circle class="chart-point" cx="${p.x}" cy="${p.y}" r="3" style="fill:${color}"/>`;
-          });
-        } else {
-          // Line or Area
-          let linePath = `M ${points[0].x} ${points[0].y}`;
-          for (let i = 1; i < points.length; i++) {
-            const prev = points[i - 1];
-            const curr = points[i];
-            const cpx = (prev.x + curr.x) / 2;
-            linePath += ` C ${cpx} ${prev.y} ${cpx} ${curr.y} ${curr.x} ${curr.y}`;
-          }
-          
-          if (chartType === 'area') {
-            const areaPath = linePath + ` L ${points[points.length-1].x} ${height-padding} L ${points[0].x} ${height-padding} Z`;
-            svg += `<path class="chart-area" d="${areaPath}" style="fill:url(#chartGradient-${id}-${seriesIdx})"/>`;
-          }
-          
-          svg += `<path class="chart-path" d="${linePath}" style="stroke:${color}"/>`;
-          
-          // Round points
-          points.forEach(p => {
-            svg += `<circle class="chart-point" cx="${p.x}" cy="${p.y}" r="1.5" style="fill:${color}"/>`;
+          if (segment.length) segments.push(segment);
+          segments.forEach(segment => {
+            let path = `M ${segment[0].x} ${segment[0].y}`;
+            for (let i = 1; i < segment.length; ++i) {
+              const prev = segment[i - 1], point = segment[i], middle = (prev.x + point.x) / 2;
+              path += model.type === 'step' ? ` H ${point.x} V ${point.y}` : ` C ${middle} ${prev.y} ${middle} ${point.y} ${point.x} ${point.y}`;
+            }
+            if (model.type === 'area') {
+              svg += `<path class="chart-area" d="${path} L ${segment.at(-1).x} 55 L ${segment[0].x} 55 Z" style="fill:url(#chartGradient-${chartToken(id)}-${seriesIndex})"/>`;
+            }
+            svg += `<path class="chart-path" d="${path}" style="stroke:${source.color}"/>`;
           });
         }
+        points.filter(Boolean).forEach(point => {
+          svg += `<circle class="chart-point" cx="${point.x}" cy="${point.y}" r="${model.type === 'scatter' ? 4 : 1.5}" style="fill:${source.color}"/>`;
+        });
       });
-      
       return svg;
     }
-    
+
     function renderChartGradients(id, config) {
-      const series = config.series || [];
-      const legacyData = config.data || [];
-      
-      let allSeries = [];
-      if (series.length > 0) {
-        allSeries = series;
-      } else if (legacyData.length > 0) {
-        allSeries = [{ name: '', color: config.color || 'primary', data: legacyData }];
-      }
-      
-      return allSeries.map((s, idx) => `
-        <linearGradient id="chartGradient-${id}-${idx}" x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" style="stop-color:var(--${s.color || 'primary'});stop-opacity:0.3"/>
-          <stop offset="100%" style="stop-color:var(--${s.color || 'primary'});stop-opacity:0"/>
-        </linearGradient>
-      `).join('');
+      return getChartModel(config).series.map((source, index) => `
+        <linearGradient id="chartGradient-${chartToken(id)}-${index}" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" style="stop-color:${source.color};stop-opacity:0.3"/>
+          <stop offset="100%" style="stop-color:${source.color};stop-opacity:0"/>
+        </linearGradient>`).join('');
     }
-    
+
     function renderChartLegend(config) {
-      const series = config.series || [];
+      const { series } = getChartModel(config);
       if (series.length <= 1) return '';
-      
-      return `<div class="chart-legend">${series.map(s => 
-        `<span class="chart-legend-item"><span class="chart-legend-dot" style="background:var(--${s.color || 'primary'})"></span>${s.name}</span>`
+      return `<div class="chart-legend">${series.map(source =>
+        `<span class="chart-legend-item"><span class="chart-legend-dot" style="background:${source.color}"></span>${escapeHtml(source.name)}</span>`
       ).join('')}</div>`;
     }
 
     function updateCard(id) {
       const card = cards[id];
       if (!card) return;
-      const el = document.querySelector(`[data-id="${id}"]`);
+      const el = getCardElement(id);
       if (!el) {
         // Not in DOM, render whole dashboard
         renderDashboard();
@@ -2357,9 +2411,9 @@
             if (lbl) lbl.textContent = card.config.label || 'Status';
             if (msg) msg.textContent = card.config.message || '';
             if (icon) {
-              icon.className = 'status-icon ' + (card.config.variant || 'primary');
+              icon.className = 'status-icon ' + (cardVariants.has(card.config.variant) ? card.config.variant : 'primary');
               const iconMap = { wifi: '📶', check: '✓', error: '✕', warning: '⚠', info: 'ℹ', power: '⚡', sync: '🔄', cloud: '☁', lock: '🔒', unlock: '🔓' };
-              icon.innerHTML = card.config.icon ? (iconMap[card.config.icon] || card.config.icon) : '●';
+              icon.textContent = card.config.icon ? (iconMap[card.config.icon] || card.config.icon) : '●';
             }
             break;
           }
@@ -2387,6 +2441,8 @@
             const newLegend = renderChartLegend(card.config);
             if (newLegend && !legendEl) {
               container.insertAdjacentHTML('beforebegin', newLegend);
+            } else if (legendEl && newLegend) {
+              legendEl.outerHTML = newLegend;
             } else if (legendEl && !newLegend) {
               legendEl.remove();
             }
@@ -2414,10 +2470,10 @@
               menu.innerHTML = (card.config.options || []).map(opt => {
                 const active = card.config.value === opt.value;
                 return `
-                  <div class="dropdown-item ${active ? 'active' : ''}" onclick="selectDropdown('${id}','${opt.value}')">
-                    <span>${opt.label || opt.value}</span>
+                  <button type="button" class="dropdown-item ${active ? 'active' : ''}" data-action="select" data-value="${escapeHtml(opt.value)}" data-command>
+                    <span>${escapeHtml(opt.label ?? opt.value)}</span>
                     ${active ? '<svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>' : ''}
-                  </div>
+                  </button>
                 `;
               }).join('');
             }
@@ -2428,10 +2484,10 @@
             const fill = el.querySelector('.slider-fill');
             const thumb = el.querySelector('.slider-thumb');
             const valDisp = el.querySelector('.slider-value');
-            const pct = Math.round(((card.config.value - (card.config.min||0))/((card.config.max||100)-(card.config.min||0)))*100);
+            const pct = rangePercent(card.config);
             if (fill) fill.style.width = `${pct}%`;
             if (thumb) thumb.style.left = `calc(${pct}% - 12px)`;
-            if (valDisp) valDisp.textContent = card.config.value || 0;
+            if (valDisp) valDisp.textContent = card.config.value ?? 0;
             break;
           }
 
@@ -2442,23 +2498,69 @@
         }
 
         // Visual update indicator (small dot flash)
-        flashIndicator(el);
+        flashIndicator(getCardElement(id) || el);
+        applyControlAvailability();
       } catch (e) {
         // On any error, safe fallback to re-render
         el.outerHTML = renderCard(card);
+        applyControlAvailability();
       }
     }
 
+    let cardEventsInitialized = false;
     function initializeCards() {
-      // Close dropdowns on outside click
-      document.addEventListener('click', (e) => {
-        if (!e.target.closest('.dropdown')) {
-          document.querySelectorAll('.dropdown.open').forEach(d => {
-            d.classList.remove('open');
-            const c = d.closest('.card');
-            if (c) c.classList.remove('dropdown-open');
+      if (cardEventsInitialized) return;
+      cardEventsInitialized = true;
+      document.addEventListener('click', event => {
+        if (!event.target.closest('.dropdown')) {
+          document.querySelectorAll('.dropdown.open').forEach(dropdown => {
+            dropdown.classList.remove('open');
+            dropdown.closest('.card')?.classList.remove('dropdown-open');
           });
         }
+        const control = event.target.closest('[data-action]');
+        const card = control?.closest('.card');
+        if (!control || !card || control.disabled) return;
+        const id = card.dataset.id, config = cards[id]?.config;
+        if (!config) return;
+        switch (control.dataset.action) {
+          case 'click': sendAction(id, 'click'); break;
+          case 'confirm':
+            if (isCommandReady()) showConfirmModal(id, config.confirmTitle || 'Confirm', config.confirmMessage || 'Are you sure?');
+            break;
+          case 'toggle': toggleSwitch(id); break;
+          case 'submit': submitInput(id); break;
+          case 'timezone': getTimezone(id); break;
+          case 'location': getLocation(id); break;
+          case 'location-manual': toggleManualLocation(id); break;
+          case 'location-set': setManualLocation(id); break;
+          case 'color-preset': changeColor(id, control.dataset.color); break;
+          case 'dropdown': toggleDropdown(id); break;
+          case 'select': selectDropdown(id, control.dataset.value); break;
+        }
+      });
+      document.addEventListener('change', event => {
+        const control = event.target.closest('[data-change]'), card = control?.closest('.card');
+        if (!card || control.disabled) return;
+        const id = card.dataset.id;
+        if (control.dataset.change === 'date') changeDate(id, control.value);
+        if (control.dataset.change === 'time') changeTime(id, control.value);
+        if (control.dataset.change === 'color') changeColor(id, control.value);
+      });
+      document.addEventListener('keydown', event => {
+        const input = event.target;
+        const card = input.closest('.card');
+        if (event.key === 'Enter' && card && cards[card.dataset.id]?.type === 'input') {
+          event.preventDefault();
+          submitInput(card.dataset.id);
+        }
+      });
+      document.addEventListener('pointerdown', event => {
+        const track = event.target.closest('[data-action="slider"]');
+        const card = track?.closest('.card');
+        if (!card || event.button > 0 || !isCommandReady()) return;
+        const config = cards[card.dataset.id].config;
+        startSlider(event, card.dataset.id, finiteNumber(config.min), finiteNumber(config.max, 100));
       });
     }
 
@@ -2473,100 +2575,101 @@
 
     function renderConsoleLogs(card) {
       const logs = card.config.logs || [];
-      return logs.map(log => `<div class="console-log-entry"><div class="console-timestamp">${log.timestamp}</div><div class="console-level ${log.level}">${log.level}</div><div class="console-message ${log.level}">${escapeHtml(log.message)}</div></div>`).join('');
+      return logs.map(log => `<div class="console-log-entry"><div class="console-timestamp">${escapeHtml(log.timestamp)}</div><div class="console-level ${escapeHtml(log.level)}">${escapeHtml(log.level)}</div><div class="console-message ${escapeHtml(log.level)}">${escapeHtml(log.message)}</div></div>`).join('');
     }
 
     // Interactive handlers
     function toggleSwitch(id) {
       const card = cards[id];
       if (!card) return;
-      card.config.value = !card.config.value;
-      sendAction(id, 'change', { value: card.config.value });
+      const value = !card.config.value;
+      if (!sendAction(id, 'change', { value })) return;
+      card.config.value = value;
       updateCard(id);
     }
 
     let activeSlider = null;
-    function startSlider(e, id, min, max) {
-      e.preventDefault();
-      activeSlider = { id, min, max };
-      updateSlider(e);
-      document.addEventListener('mousemove', updateSlider);
-      document.addEventListener('mouseup', stopSlider);
+    function startSlider(event, id, min, max) {
+      if (!isCommandReady() || max <= min) return;
+      event.preventDefault();
+      activeSlider = { id, min, max, original: cards[id].config.value };
+      updateSlider(event);
+      document.addEventListener('pointermove', updateSlider);
+      document.addEventListener('pointerup', stopSlider);
+      document.addEventListener('pointercancel', cancelSlider);
     }
 
-    function startSliderTouch(e, id, min, max) {
-      activeSlider = { id, min, max };
-      updateSliderTouch(e);
-      document.addEventListener('touchmove', updateSliderTouch, { passive: false });
-      document.addEventListener('touchend', stopSlider);
-    }
-
-    function updateSlider(e) {
-      if (!activeSlider) return;
+    function sliderValueAt(clientX) {
       const { id, min, max } = activeSlider;
-      const track = document.querySelector(`[data-id="${id}"] .slider-track`);
-      const rect = track.getBoundingClientRect();
-      let pct = (e.clientX - rect.left) / rect.width;
-      pct = Math.max(0, Math.min(1, pct));
-      const step = cards[id].config.step || 1;
-      let value = min + pct * (max - min);
-      value = Math.round(value / step) * step;
-      cards[id].config.value = Math.max(min, Math.min(max, value));
-      updateCard(id);
+      const track = getCardElement(id)?.querySelector('.slider-track');
+      if (!track) return null;
+      const bounds = track.getBoundingClientRect();
+      if (bounds.width <= 0) return null;
+      const percentage = Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width));
+      const configuredStep = finiteNumber(cards[id].config.step, 1);
+      const step = configuredStep > 0 ? configuredStep : 1;
+      const steps = Math.min(Math.floor((max - min) / step + 1e-9), Math.round(percentage * (max - min) / step));
+      return Number((min + steps * step).toPrecision(12));
     }
 
-    function updateSliderTouch(e) {
+    function updateSlider(event) {
       if (!activeSlider) return;
-      e.preventDefault();
-      const touch = e.touches[0];
-      const { id, min, max } = activeSlider;
-      const track = document.querySelector(`[data-id="${id}"] .slider-track`);
-      const rect = track.getBoundingClientRect();
-      let pct = (touch.clientX - rect.left) / rect.width;
-      pct = Math.max(0, Math.min(1, pct));
-      const step = cards[id].config.step || 1;
-      let value = min + pct * (max - min);
-      value = Math.round(value / step) * step;
-      cards[id].config.value = Math.max(min, Math.min(max, value));
-      updateCard(id);
+      const value = sliderValueAt(event.clientX);
+      if (value === null) return;
+      cards[activeSlider.id].config.value = value;
+      updateCard(activeSlider.id);
+    }
+
+    function clearSliderListeners() {
+      document.removeEventListener('pointermove', updateSlider);
+      document.removeEventListener('pointerup', stopSlider);
+      document.removeEventListener('pointercancel', cancelSlider);
     }
 
     function stopSlider() {
-      if (activeSlider) {
-        sendAction(activeSlider.id, 'change', { value: cards[activeSlider.id].config.value });
+      if (!activeSlider) return;
+      const { id, original } = activeSlider;
+      if (!sendAction(id, 'change', { value: cards[id].config.value })) {
+        cards[id].config.value = original;
+        updateCard(id);
       }
       activeSlider = null;
-      document.removeEventListener('mousemove', updateSlider);
-      document.removeEventListener('mouseup', stopSlider);
-      document.removeEventListener('touchmove', updateSliderTouch);
-      document.removeEventListener('touchend', stopSlider);
+      clearSliderListeners();
+    }
+
+    function cancelSlider() {
+      if (activeSlider && cards[activeSlider.id]) {
+        cards[activeSlider.id].config.value = activeSlider.original;
+        updateCard(activeSlider.id);
+      }
+      activeSlider = null;
+      clearSliderListeners();
     }
 
     function submitInput(id) {
       const input = document.getElementById(`input-${id}`);
-      if (input) {
-        cards[id].config.value = input.value;
-        sendAction(id, 'submit', { value: input.value });
-      }
+      if (!input || !input.reportValidity()) return;
+      if (sendAction(id, 'submit', { value: input.value })) cards[id].config.value = input.value;
     }
 
     function changeColor(id, color) {
-      cards[id].config.value = color;
-      sendAction(id, 'change', { color });
+      if (!/^#[\da-f]{6}$/i.test(color)) return;
+      if (sendAction(id, 'change', { color })) cards[id].config.value = color;
       updateCard(id);
     }
 
     function changeDate(id, value) {
-      cards[id].config.value = value;
-      sendAction(id, 'change', { value });
+      if (sendAction(id, 'change', { value })) cards[id].config.value = value;
+      else document.getElementById(`date-${id}`).value = cards[id].config.value || '';
     }
 
     function changeTime(id, value) {
-      cards[id].config.value = value;
-      sendAction(id, 'change', { value });
+      if (sendAction(id, 'change', { value })) cards[id].config.value = value;
+      else document.getElementById(`time-${id}`).value = cards[id].config.value || '';
     }
 
     function getLocation(id) {
+      if (!isCommandReady()) { showActionError('Disconnected: the command was not sent.'); return; }
       const errorDiv = document.getElementById(`loc-error-${id}`);
       const manualDiv = document.getElementById(`loc-manual-${id}`);
       
@@ -2579,7 +2682,7 @@
         return;
       }
       
-      const btn = document.querySelector(`[data-id="${id}"] .btn.btn-info, [data-id="${id}"] .btn.btn-primary`);
+      const btn = getCardElement(id)?.querySelector('[data-action="location"]');
       if (btn) btn.textContent = 'Getting location...';
       if (errorDiv) errorDiv.style.display = 'none';
       
@@ -2587,6 +2690,7 @@
         (position) => {
           const lat = position.coords.latitude;
           const lon = position.coords.longitude;
+          if (!sendAction(id, 'location', { latitude: lat, longitude: lon })) return;
           cards[id].config.latitude = lat;
           cards[id].config.longitude = lon;
           
@@ -2594,10 +2698,10 @@
           if (display) {
             display.innerHTML = `Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}`;
           }
-          if (btn) btn.innerHTML = `<svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 6.9 8 11.7z"/></svg> ${cards[id].config.label || 'Get Location'}`;
+          if (btn) btn.innerHTML = `<svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 6.9 8 11.7z"/></svg> ${escapeHtml(cards[id].config.label || 'Get Location')}`;
           if (manualDiv) manualDiv.style.display = 'none';
           
-          sendAction(id, 'location', { latitude: lat, longitude: lon });
+
         },
         (error) => {
           let errorMsg = 'Unable to get location. ';
@@ -2612,7 +2716,7 @@
             errorDiv.style.display = 'block';
           }
           if (manualDiv) manualDiv.style.display = 'block';
-          if (btn) btn.innerHTML = `<svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 6.9 8 11.7z"/></svg> ${cards[id].config.label || 'Get Location'}`;
+          if (btn) btn.innerHTML = `<svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 6.9 8 11.7z"/></svg> ${escapeHtml(cards[id].config.label || 'Get Location')}`;
         },
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
@@ -2636,6 +2740,7 @@
         return;
       }
       
+      if (!sendAction(id, 'location', { latitude: lat, longitude: lon })) return;
       cards[id].config.latitude = lat;
       cards[id].config.longitude = lon;
       
@@ -2647,7 +2752,7 @@
       const errorDiv = document.getElementById(`loc-error-${id}`);
       if (errorDiv) errorDiv.style.display = 'none';
       
-      sendAction(id, 'location', { latitude: lat, longitude: lon });
+
     }
 
     function clearConsole(id) {
@@ -2661,6 +2766,7 @@
       if (!input || !input.value.trim()) return;
       
       const command = input.value.trim();
+      if (!sendAction(id, 'command', { command })) return;
       input.value = '';
       
       // Add command to local logs immediately
@@ -2675,7 +2781,7 @@
       });
       
       // Send command to ESP32
-      sendAction(id, 'command', { command: command });
+
       updateCard(id);
       
       // Auto-scroll to bottom
@@ -2683,10 +2789,9 @@
       if (logsEl) logsEl.scrollTop = logsEl.scrollHeight;
     }
 
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
+    function escapeHtml(value) {
+      if (value == null || !['string', 'number', 'boolean'].includes(typeof value)) return '';
+      return String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
     }
 
     function getTimezone(id) {
@@ -2696,8 +2801,8 @@
       const offsetMins = Math.abs(offset % 60);
       const offsetStr = `UTC${offset <= 0 ? '+' : '-'}${String(offsetHours).padStart(2,'0')}:${String(offsetMins).padStart(2,'0')}`;
       
+      if (!sendAction(id, 'timezone', { timezone: tz, offset: offset, offsetString: offsetStr })) return;
       cards[id].config.value = `${tz} (${offsetStr})`;
-      sendAction(id, 'timezone', { timezone: tz, offset: offset, offsetString: offsetStr });
       updateCard(id);
     }
 
@@ -2722,8 +2827,8 @@
     }
 
     function selectDropdown(id, value) {
+      if (!sendAction(id, 'change', { value })) return;
       cards[id].config.value = value;
-      sendAction(id, 'change', { value });
       updateCard(id);
 
       // Close dropdown and restore card clipping
@@ -2782,44 +2887,7 @@
     }
 
     function uploadFirmware(id, file) {
-      const zone = document.getElementById(`upload-${id}`);
-      const progress = document.getElementById(`progress-${id}`);
-      
-      zone.style.display = 'none';
-      progress.style.display = 'block';
-      
-      // Start OTA
-      sendAction(id, 'ota_start', { name: file.name, size: file.size });
-      
-      const reader = new FileReader();
-      const chunkSize = 1024;
-      let offset = 0;
-      
-      reader.onload = () => {
-        const data = new Uint8Array(reader.result);
-        
-        function sendChunk() {
-          if (offset >= data.length) {
-            sendAction(id, 'ota_end', {});
-            document.getElementById(`progress-status-${id}`).textContent = 'Upload complete! Restarting...';
-            return;
-          }
-          
-          const chunk = data.slice(offset, offset + chunkSize);
-          const b64 = btoa(String.fromCharCode.apply(null, chunk));
-          sendAction(id, 'ota_chunk', { data: b64 });
-          offset += chunkSize;
-          const pct = Math.min(100, Math.round((offset / data.length) * 100));
-          document.getElementById(`progress-fill-${id}`).style.width = pct + '%';
-          document.getElementById(`progress-pct-${id}`).textContent = pct + '%';
-          
-          setTimeout(sendChunk, 20);
-        }
-        
-        sendChunk();
-      };
-      
-      reader.readAsArrayBuffer(file);
+      return uploadPageFirmware(file);
     }
 
     // Tab Navigation
@@ -2887,9 +2955,9 @@
       } else {
         logsEl.innerHTML = filteredLogs.map(log => `
           <div class="console-log-entry">
-            <span class="console-timestamp">${log.timestamp}</span>
-            <span class="console-level ${log.level}">${log.level}</span>
-            <span class="console-message ${log.level}">${escapeHtml(log.message)}</span>
+            <span class="console-timestamp">${escapeHtml(log.timestamp)}</span>
+            <span class="console-level ${escapeHtml(log.level)}">${escapeHtml(log.level)}</span>
+            <span class="console-message ${escapeHtml(log.level)}">${escapeHtml(log.message)}</span>
           </div>
         `).join('');
         
@@ -2933,22 +3001,15 @@
     function sendPageCommand() {
       const input = document.getElementById('page-console-input');
       if (!input || !input.value.trim()) return;
-      
       const command = input.value.trim();
+      if (!sendMessage({ type: 'command', command })) return;
       input.value = '';
-      
-      // Add command to page logs
       addPageLog('info', '> ' + command);
-      
-      // Send command to server - server will route to the console handler
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'command', command: command }));
-      }
     }
-    
+
     function exportLogs() {
       const content = pageConsoleLogs.map(log => 
-        `[${log.timestamp}] [${log.level.toUpperCase()}] ${log.message}`
+        `[${escapeHtml(log.timestamp)}] [${log.level.toUpperCase()}] ${log.message}`
       ).join('\n');
       
       const blob = new Blob([content], { type: 'text/plain' });
@@ -2960,82 +3021,148 @@
       URL.revokeObjectURL(url);
     }
     
-    // Page OTA Functions
-    function handlePageOtaDrop(e) {
-      e.preventDefault();
-      e.currentTarget.classList.remove('dragover');
-      const file = e.dataTransfer.files[0];
-      if (file) uploadPageFirmware(file);
+    // One in-flight OTA request at a time; progress reflects firmware acknowledgements.
+    let otaSession = null;
+
+    function handlePageOtaDrop(event) {
+      event.preventDefault();
+      event.currentTarget.classList.remove('dragover');
+      if (event.dataTransfer.files[0]) uploadPageFirmware(event.dataTransfer.files[0]);
     }
-    
-    function handlePageOtaSelect(e) {
-      const file = e.target.files[0];
-      if (file) uploadPageFirmware(file);
+
+    function handlePageOtaSelect(event) {
+      if (event.target.files[0]) uploadPageFirmware(event.target.files[0]);
     }
-    
-    function uploadPageFirmware(file) {
-      const zone = document.getElementById('page-upload-zone');
-      const progress = document.getElementById('page-ota-progress');
-      
-      zone.style.display = 'none';
-      progress.style.display = 'block';
-      
-      // Send OTA start
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ota_start', name: file.name, size: file.size }));
+
+    function updateOtaProgress(received, size, message) {
+      const percent = size ? Math.max(0, Math.min(100, Math.round(received / size * 100))) : 0;
+      document.getElementById('page-progress-fill').style.width = percent + '%';
+      document.getElementById('page-progress-pct').textContent = percent + '%';
+      document.getElementById('page-progress-status').textContent = message;
+    }
+
+    function handleOtaStatus(message) {
+      const session = otaSession;
+      const pending = session?.pending;
+      if (!session?.active || !pending || message.uploadId !== session.id || message.seq !== pending.sequence || message.action !== pending.action) return;
+      clearTimeout(pending.timer);
+      session.pending = null;
+      if (message.stage === 'error' || message.stage === 'aborted') {
+        pending.reject(new Error(message.error || 'Firmware upload was aborted.'));
+      } else if (message.stage !== pending.stage) {
+        pending.reject(new Error('Unexpected OTA acknowledgement.'));
+      } else if (!Number.isSafeInteger(message.received) || message.received !== pending.received || message.size !== session.file.size) {
+        pending.reject(new Error('Invalid OTA progress received from the device.'));
+      } else {
+        pending.resolve(message);
       }
-      
-      const reader = new FileReader();
-      const chunkSize = 2048;
-      let offset = 0;
-      
-      reader.onload = () => {
-        const data = new Uint8Array(reader.result);
-        
-        function sendChunk() {
-          if (offset >= data.length) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'ota_end' }));
-            }
-            document.getElementById('page-progress-status').textContent = 'Upload complete! Restarting...';
-            addPageLog('info', 'OTA upload complete. Device restarting...');
-            
-            // Reset OTA upload form after 5 seconds
-            setTimeout(() => {
-              const zone = document.getElementById('page-upload-zone');
-              const progress = document.getElementById('page-ota-progress');
-              const fileInput = document.getElementById('page-ota-file');
-              if (zone) zone.style.display = 'block';
-              if (progress) progress.style.display = 'none';
-              if (fileInput) fileInput.value = '';
-              document.getElementById('page-progress-fill').style.width = '0%';
-              document.getElementById('page-progress-pct').textContent = '0%';
-              document.getElementById('page-progress-status').textContent = 'Uploading...';
-            }, 5000);
-            return;
-          }
-          
-          const chunk = data.slice(offset, offset + chunkSize);
-          const b64 = btoa(String.fromCharCode.apply(null, chunk));
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ota_chunk', data: b64 }));
-          }
-          
-          offset += chunkSize;
-          const pct = Math.min(100, Math.round((offset / data.length) * 100));
-          document.getElementById('page-progress-fill').style.width = pct + '%';
-          document.getElementById('page-progress-pct').textContent = pct + '%';
-          
-          setTimeout(sendChunk, 20);
-        }
-        
-        addPageLog('info', `Starting OTA upload: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
-        sendChunk();
-      };
-      
-      reader.readAsArrayBuffer(file);
     }
-    
+
+    function requestOta(session, action, data, stage, received) {
+      if (!session.active || session.socket !== ws || !isCommandReady()) return Promise.reject(new Error('Connection lost during OTA.'));
+      return new Promise((resolve, reject) => {
+        const sequence = ++session.sequence;
+        const timer = setTimeout(() => {
+          if (session.pending?.sequence === sequence) {
+            session.pending = null;
+            reject(new Error('The device did not acknowledge the upload. Check its firmware and connection.'));
+          }
+        }, 10000);
+        session.pending = { action, sequence, stage, received, resolve, reject, timer };
+        if (!sendMessage({ type: action, uploadId: session.id, seq: sequence, ...data }, session.socket)) {
+          clearTimeout(timer);
+          session.pending = null;
+          reject(new Error('The firmware message could not be sent.'));
+        }
+      });
+    }
+
+    function readFirmwareChunk(session, offset, length) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        session.reader = reader;
+        reader.onload = () => { session.reader = null; resolve(new Uint8Array(reader.result)); };
+        reader.onerror = () => { session.reader = null; reject(new Error('Cannot read the firmware file.')); };
+        reader.onabort = () => { session.reader = null; reject(new Error(session.failure || 'Firmware upload cancelled.')); };
+        reader.readAsArrayBuffer(session.file.slice(offset, offset + length));
+      });
+    }
+
+    function failActiveOta(message) {
+      const session = otaSession;
+      if (!session?.active) return;
+      session.failure = message;
+      session.active = false;
+      if (session.pending) {
+        clearTimeout(session.pending.timer);
+        session.pending.reject(new Error(message));
+        session.pending = null;
+      }
+      if (session.reader?.readyState === 1) session.reader.abort();
+    }
+
+    function cancelOtaUpload() {
+      if (!otaSession?.active) return;
+      sendMessage({ type: 'ota_abort', uploadId: otaSession.id, seq: ++otaSession.sequence }, otaSession.socket);
+      failActiveOta('Firmware upload cancelled.');
+    }
+
+    async function uploadPageFirmware(file) {
+      if (!isCommandReady()) { showActionError('Disconnected: no firmware was sent.'); return false; }
+      if (otaSession?.active) { showActionError('A firmware upload is already in progress.'); return false; }
+      if (!file || !Number.isSafeInteger(file.size) || file.size <= 0 || file.size > 4 * 1024 * 1024 || !/\.(bin|ota)$/i.test(file.name)) {
+        showActionError('Select a non-empty .bin or .ota firmware file, up to 4 MB. The OTA partition must also be large enough.');
+        return false;
+      }
+      const session = { id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        sequence: -1, socket: ws, file, active: true, pending: null, reader: null, received: 0 };
+      otaSession = session;
+      const zone = document.getElementById('page-upload-zone');
+      const cancel = document.getElementById('page-ota-cancel');
+      zone.style.display = 'none';
+      document.getElementById('page-ota-progress').style.display = 'block';
+      cancel.hidden = false;
+      document.getElementById('page-progress-status').style.color = '';
+      updateOtaProgress(0, file.size, 'Waiting for the device...');
+      applyControlAvailability();
+      try {
+        await requestOta(session, 'ota_start', { name: file.name, size: file.size }, 'ready', 0);
+        for (let offset = 0; offset < file.size;) {
+          const chunk = await readFirmwareChunk(session, offset, Math.min(2048, file.size - offset));
+          if (!session.active) throw new Error(session.failure || 'Upload stopped.');
+          if (chunk.length === 0) throw new Error('The firmware file could not be read completely.');
+          const encoded = btoa(String.fromCharCode(...chunk));
+          offset += chunk.length;
+          const reply = await requestOta(session, 'ota_chunk', { data: encoded }, 'progress', offset);
+          session.received = reply.received;
+          updateOtaProgress(reply.received, file.size, reply.received === file.size ? 'Verifying firmware...' : 'Uploading...');
+        }
+        cancel.hidden = true; // Verification may already commit the new boot partition.
+        await requestOta(session, 'ota_end', {}, 'complete', file.size);
+        session.active = false;
+        session.complete = true;
+        updateOtaProgress(file.size, file.size, 'Firmware verified. Device restarting...');
+        addPageLog('info', 'Firmware verified by the device. Restarting...');
+        return true;
+      } catch (error) {
+        if (session.active && isCommandReady() && session.socket === ws) {
+          sendMessage({ type: 'ota_abort', uploadId: session.id, seq: ++session.sequence }, session.socket);
+        }
+        session.active = false;
+        if (session.pending) clearTimeout(session.pending.timer);
+        session.pending = null;
+        document.getElementById('page-progress-status').style.color = 'var(--danger)';
+        updateOtaProgress(session.received, file.size, session.failure || error.message || 'Firmware upload failed.');
+        addPageLog('error', session.failure || error.message || 'Firmware upload failed.');
+        zone.style.display = '';
+        document.getElementById('page-ota-file').value = '';
+        return false;
+      } finally {
+        cancel.hidden = true;
+        applyControlAvailability();
+      }
+    }
+
     // Hook into WebSocket messages for page console
     const originalHandleMessage = handleMessage;
     handleMessage = function(msg) {
@@ -3140,6 +3267,7 @@
     }
 
     // Initialize
+    initializeCards();
     initTheme();
     connect();
     setInterval(updateConsoleTimestamp, 1000);

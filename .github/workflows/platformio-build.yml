@@ -44,3 +44,12 @@ jobs:
 
       - name: Build (matrix env)
         run: pio run -e ${{ matrix.env }} -v
+
+      - name: Check native dashboard contracts
+        run: python scripts/test_native.py --environment ${{ matrix.env }}
+
+      - name: Install frontend test dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Check frontend behavior
+        run: npm test
