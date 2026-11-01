@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     strategy:
       matrix:
@@ -16,34 +16,32 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: '3.x'
+          python-version-file: .python-version
 
       - name: Install PlatformIO
         run: |
-          python -m pip install --upgrade pip
-          pip install --upgrade platformio
+          python -m pip install -r requirements-build.txt
+          python -m pip check
 
       - name: Cache PlatformIO packages
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.platformio
-          key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
-          restore-keys: |
-            ${{ runner.os }}-platformio-
+          key: ${{ runner.os }}-pio-${{ matrix.env }}-${{ hashFiles('platformio.ini', 'library.json', 'requirements-build.txt', 'constraints-build.txt', '.python-version') }}
 
-      - name: Install library deps
-        run: pio lib install
+      - name: Check HTML generation
+        run: python -m unittest discover -s tests -v
 
       - name: Run pre-build script (generate header)
         run: python scripts/html_to_header_pio.py
 
       - name: Build (matrix env)
-        run: pio run -e ${{ matrix.env }} -v
+        run: python scripts/build.py -e ${{ matrix.env }} -v
 
       - name: Check native dashboard contracts
         run: python scripts/test_native.py --environment ${{ matrix.env }}
